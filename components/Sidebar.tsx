@@ -37,17 +37,8 @@ export function Sidebar() {
   if (pathname === "/login") return null;
 
   return (
-    <aside className="hidden md:flex w-60 shrink-0 flex-col border-r border-ink-700 bg-ink-950 px-3 py-5">
+    <aside className="hidden md:flex sticky top-0 h-screen w-60 shrink-0 flex-col overflow-y-auto border-r border-ink-700 bg-ink-950 px-3 py-5">
       <div className="px-3 pb-6">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src="/logo.png"
-          alt="The Foursales Company"
-          className="mb-2 h-7 w-auto"
-          onError={(e) => {
-            (e.currentTarget as HTMLImageElement).style.display = "none";
-          }}
-        />
         <div className="font-display text-lg font-semibold text-paper-100 tracking-tight">
           The Foursales Company
         </div>
