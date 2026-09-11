@@ -1,9 +1,24 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { dominioPermitido } from "@/lib/auth";
+import { origemPublica } from "@/lib/url";
 
 // Rotas que não exigem login.
 const ROTAS_PUBLICAS = ["/login", "/auth/callback"];
+
+// request.nextUrl.clone() herda o host que o Next enxergou na requisição —
+// que atrás do proxy do Railway é o endereço interno (localhost:<porta>),
+// não o domínio público. Por isso todo redirect daqui reconstrói a URL a
+// partir da origem pública de verdade (via X-Forwarded-Host/Proto).
+function construirRedirect(request: NextRequest, pathname: string, params?: Record<string, string>) {
+  const destino = new URL(pathname, origemPublica(request));
+  if (params) {
+    for (const [chave, valor] of Object.entries(params)) {
+      destino.searchParams.set(chave, valor);
+    }
+  }
+  return destino;
+}
 
 export async function middleware(request: NextRequest) {
   let response = NextResponse.next({ request: { headers: request.headers } });
@@ -37,10 +52,9 @@ export async function middleware(request: NextRequest) {
   const rotaPublica = ROTAS_PUBLICAS.some((rota) => request.nextUrl.pathname.startsWith(rota));
 
   if (!user && !rotaPublica) {
-    const url = request.nextUrl.clone();
-    url.pathname = "/login";
-    url.searchParams.set("redirect", request.nextUrl.pathname);
-    return NextResponse.redirect(url);
+    return NextResponse.redirect(
+      construirRedirect(request, "/login", { redirect: request.nextUrl.pathname })
+    );
   }
 
   // Segunda camada: se por algum motivo existe uma sessão válida mas de um
@@ -48,17 +62,13 @@ export async function middleware(request: NextRequest) {
   // regra existir), derruba e manda pro login com um aviso.
   if (user && !dominioPermitido(user.email) && !rotaPublica) {
     await supabase.auth.signOut();
-    const url = request.nextUrl.clone();
-    url.pathname = "/login";
-    url.searchParams.set("erro", "dominio_nao_permitido");
-    return NextResponse.redirect(url);
+    return NextResponse.redirect(
+      construirRedirect(request, "/login", { erro: "dominio_nao_permitido" })
+    );
   }
 
   if (user && request.nextUrl.pathname === "/login") {
-    const url = request.nextUrl.clone();
-    url.pathname = "/";
-    url.search = "";
-    return NextResponse.redirect(url);
+    return NextResponse.redirect(construirRedirect(request, "/"));
   }
 
   return response;
