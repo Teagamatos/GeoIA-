@@ -132,9 +132,26 @@ export default function FontesPage() {
     }
   }
 
-  const topDominios = useMemo(() => {
+  // Separados por tipo — "consultada" (o modelo pesquisou o domínio) e
+  // "citada" (o domínio virou referência na resposta) são eventos diferentes,
+  // então os domínios mais frequentes de cada um também são listas diferentes.
+  const topDominiosCitados = useMemo(() => {
     const contagem = new Map<string, number>();
-    resumos.forEach((r) => contagem.set(r.dominio, (contagem.get(r.dominio) ?? 0) + r.aparicoes));
+    resumos.forEach((r) => {
+      if (r.tipo !== "citada") return;
+      contagem.set(r.dominio, (contagem.get(r.dominio) ?? 0) + r.aparicoes);
+    });
+    return Array.from(contagem.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8);
+  }, [resumos]);
+
+  const topDominiosConsultados = useMemo(() => {
+    const contagem = new Map<string, number>();
+    resumos.forEach((r) => {
+      if (r.tipo !== "consultada") return;
+      contagem.set(r.dominio, (contagem.get(r.dominio) ?? 0) + r.aparicoes);
+    });
     return Array.from(contagem.entries())
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8);
@@ -142,7 +159,7 @@ export default function FontesPage() {
 
   const colunas: { key: SortKey; label: string; align: "left" | "right" }[] = [
     { key: "chave", label: modo === "url" ? "URL" : "Domínio", align: "left" },
-    { key: "citadaPct", label: "Citada", align: "right" },
+    { key: "citadaPct", label: "Presença", align: "right" },
     { key: "aparicoes", label: "Aparições", align: "right" },
     { key: "ordemMedia", label: "Ordem média", align: "right" },
     { key: "vistoPorUltimo", label: "Visto por último", align: "right" },
@@ -170,21 +187,45 @@ export default function FontesPage() {
         </div>
       )}
 
-      {topDominios.length > 0 && (
-        <div className="mb-5 flex flex-wrap gap-2">
-          {topDominios.map(([dominio, count]) => (
-            <button
-              key={dominio}
-              onClick={() => setFiltro((f) => (f === dominio ? "" : dominio))}
-              className={`rounded-full border px-3 py-1 text-xs transition-colors ${
-                filtro === dominio
-                  ? "border-signal-amber text-signal-amber bg-signal-amber/10"
-                  : "border-surface-200 bg-surface-0 text-slate-700 hover:border-signal-amber hover:text-signal-amber"
-              }`}
-            >
-              {dominio} · {count}
-            </button>
-          ))}
+      {topDominiosCitados.length > 0 && (
+        <div className="mb-3">
+          <div className="mb-1.5 text-xs text-slate-500">Mais citados (viraram referência na resposta)</div>
+          <div className="flex flex-wrap gap-2">
+            {topDominiosCitados.map(([dominio, count]) => (
+              <button
+                key={dominio}
+                onClick={() => setFiltro((f) => (f === dominio ? "" : dominio))}
+                className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                  filtro === dominio
+                    ? "border-signal-amber text-signal-amber bg-signal-amber/10"
+                    : "border-surface-200 bg-surface-0 text-slate-700 hover:border-signal-amber hover:text-signal-amber"
+                }`}
+              >
+                {dominio} · {count}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {topDominiosConsultados.length > 0 && (
+        <div className="mb-5">
+          <div className="mb-1.5 text-xs text-slate-500">Mais consultados (o modelo pesquisou, mesmo sem citar)</div>
+          <div className="flex flex-wrap gap-2">
+            {topDominiosConsultados.map(([dominio, count]) => (
+              <button
+                key={dominio}
+                onClick={() => setFiltro((f) => (f === dominio ? "" : dominio))}
+                className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                  filtro === dominio
+                    ? "border-signal-teal text-signal-teal bg-signal-teal/10"
+                    : "border-surface-200 bg-surface-0 text-slate-700 hover:border-signal-teal hover:text-signal-teal"
+                }`}
+              >
+                {dominio} · {count}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -275,7 +316,7 @@ export default function FontesPage() {
             </thead>
             <tbody>
               {ordenados.map((r) => (
-                <tr key={r.chave} className="border-b border-surface-100 last:border-0">
+                <tr key={`${r.chave}::${r.tipo ?? ""}`} className="border-b border-surface-100 last:border-0">
                   <td className="px-4 py-3 max-w-xs">
                     <a
                       href={modo === "url" ? r.chave : `https://${r.dominio}`}

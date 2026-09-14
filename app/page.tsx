@@ -36,6 +36,7 @@ export default function DashboardPage() {
   const [fontesAtual, setFontesAtual] = useState<Fonte[]>([]);
   const [execucoesAnterior, setExecucoesAnterior] = useState<Execucao[]>([]);
   const [mencoesAnterior, setMencoesAnterior] = useState<Mencao[]>([]);
+  const [fontesAnterior, setFontesAnterior] = useState<Fonte[]>([]);
 
   const [diasRange, setDiasRange] = useState(7);
   const [marcaSelecionada, setMarcaSelecionada] = useState<string | null>(null);
@@ -72,14 +73,16 @@ export default function DashboardPage() {
         setExecucoesAtual(execAtual);
         setExecucoesAnterior(execAnterior);
 
-        const [mencAtual, fontAtual, mencAnterior] = await Promise.all([
+        const [mencAtual, fontAtual, mencAnterior, fontAnterior] = await Promise.all([
           getMencoesPorExecucoes(execAtual.map((e) => e.id)),
           getFontesPorExecucoes(execAtual.map((e) => e.id)),
           getMencoesPorExecucoes(execAnterior.map((e) => e.id)),
+          getFontesPorExecucoes(execAnterior.map((e) => e.id)),
         ]);
         setMencoesAtual(mencAtual);
         setFontesAtual(fontAtual);
         setMencoesAnterior(mencAnterior);
+        setFontesAnterior(fontAnterior);
       } catch (e: any) {
         setErro(e.message ?? "Erro ao carregar dados do Supabase.");
       } finally {
@@ -119,6 +122,11 @@ export default function DashboardPage() {
     const idsValidos = new Set(execucoesAtualFiltradas.map((e) => e.id));
     return fontesAtual.filter((f) => idsValidos.has(f.execucao_id));
   }, [fontesAtual, execucoesAtualFiltradas, promptSelecionado]);
+  const fontesAnteriorFiltradas = useMemo(() => {
+    if (!promptSelecionado) return fontesAnterior;
+    const idsValidos = new Set(execucoesAnteriorFiltradas.map((e) => e.id));
+    return fontesAnterior.filter((f) => idsValidos.has(f.execucao_id));
+  }, [fontesAnterior, execucoesAnteriorFiltradas, promptSelecionado]);
 
   const metricasAtual = useMemo(
     () => calcularMetricasPorMarca(marcas, execucoesAtualFiltradas, mencoesAtualFiltradas),
@@ -132,12 +140,19 @@ export default function DashboardPage() {
   const minhaMarcaAtual = metricasAtual.find((m) => m.marca.id === marcaSelecionada);
   const minhaMarcaAnterior = metricasAnterior.find((m) => m.marca.id === marcaSelecionada);
 
+  const presencaVazia = {
+    execucoesComFonteConsultada: 0,
+    execucoesComFonteCitada: 0,
+    totalExecucoes: 0,
+    percentualConsultada: 0,
+    percentualCitada: 0,
+  };
   const presencaAtual = marcaSelecionada
     ? calcularPresencaDeFontes(marcaSelecionada, execucoesAtualFiltradas, fontesAtualFiltradas, dominios)
-    : { execucoesComFontePropria: 0, totalExecucoes: 0, percentual: 0 };
+    : presencaVazia;
   const presencaAnterior = marcaSelecionada
-    ? calcularPresencaDeFontes(marcaSelecionada, execucoesAnteriorFiltradas, [], dominios)
-    : { execucoesComFontePropria: 0, totalExecucoes: 0, percentual: 0 };
+    ? calcularPresencaDeFontes(marcaSelecionada, execucoesAnteriorFiltradas, fontesAnteriorFiltradas, dominios)
+    : presencaVazia;
 
   const breakdown = marcaSelecionada
     ? calcularBreakdownPorDimensao(
@@ -186,7 +201,7 @@ export default function DashboardPage() {
         <SkeletonDashboard />
       ) : (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8 items-stretch">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-8 items-stretch">
             <StatCard
               label="Visibilidade"
               sublabel="Visibilidade média no período"
@@ -206,15 +221,27 @@ export default function DashboardPage() {
               }}
             />
             <StatCard
-              label="Presença de fontes"
-              sublabel="Execuções citando domínio próprio"
-              value={`${presencaAtual.percentual.toFixed(0)}%`}
-              delta={presencaAtual.percentual - presencaAnterior.percentual}
+              label="Fonte consultada"
+              sublabel="O modelo pesquisou um domínio próprio"
+              value={`${presencaAtual.percentualConsultada.toFixed(0)}%`}
+              delta={presencaAtual.percentualConsultada - presencaAnterior.percentualConsultada}
               accent="teal"
               frac={{
-                parte: presencaAtual.execucoesComFontePropria,
+                parte: presencaAtual.execucoesComFonteConsultada,
                 total: presencaAtual.totalExecucoes,
-                descricao: "respostas incluem suas fontes",
+                descricao: "respostas consultam suas fontes",
+              }}
+            />
+            <StatCard
+              label="Fonte citada"
+              sublabel="O modelo citou um domínio próprio como referência"
+              value={`${presencaAtual.percentualCitada.toFixed(0)}%`}
+              delta={presencaAtual.percentualCitada - presencaAnterior.percentualCitada}
+              accent="rose"
+              frac={{
+                parte: presencaAtual.execucoesComFonteCitada,
+                total: presencaAtual.totalExecucoes,
+                descricao: "respostas citam suas fontes",
               }}
             />
           </div>
@@ -266,6 +293,7 @@ function SkeletonDashboard() {
   return (
     <div className="animate-pulse space-y-6">
       <div className="flex gap-4">
+        <div className="h-28 flex-1 rounded-card bg-surface-50" />
         <div className="h-28 flex-1 rounded-card bg-surface-50" />
         <div className="h-28 flex-1 rounded-card bg-surface-50" />
       </div>

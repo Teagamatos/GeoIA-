@@ -123,11 +123,20 @@ export function calcularMetricasPorMarca(
 }
 
 export interface PresencaFontes {
-  execucoesComFontePropria: number;
+  execucoesComFonteConsultada: number;
+  execucoesComFonteCitada: number;
   totalExecucoes: number;
-  percentual: number;
+  percentualConsultada: number;
+  percentualCitada: number;
 }
 
+/**
+ * Separa "o modelo pesquisou um domínio próprio" (fonte.tipo = "consultada")
+ * de "o modelo citou um domínio próprio como referência na resposta"
+ * (fonte.tipo = "citada"). São eventos diferentes — a marca pode ser
+ * consultada sem ser citada (o modelo leu e não usou como referência final),
+ * então tratar como uma métrica só escondia essa diferença.
+ */
 export function calcularPresencaDeFontes(
   marcaId: string,
   execucoes: Execucao[],
@@ -140,19 +149,30 @@ export function calcularPresencaDeFontes(
   const totalExecucoes = execucoes.length;
 
   if (dominiosDaMarca.size === 0 || totalExecucoes === 0) {
-    return { execucoesComFontePropria: 0, totalExecucoes, percentual: 0 };
+    return {
+      execucoesComFonteConsultada: 0,
+      execucoesComFonteCitada: 0,
+      totalExecucoes,
+      percentualConsultada: 0,
+      percentualCitada: 0,
+    };
   }
 
-  const execucoesComFontePropria = new Set(
-    fontes
-      .filter((f) => f.dominio && dominiosDaMarca.has(f.dominio.toLowerCase()))
-      .map((f) => f.execucao_id)
+  const fontesDaMarca = fontes.filter((f) => f.dominio && dominiosDaMarca.has(f.dominio.toLowerCase()));
+
+  const execucoesComFonteConsultada = new Set(
+    fontesDaMarca.filter((f) => f.tipo === "consultada").map((f) => f.execucao_id)
+  );
+  const execucoesComFonteCitada = new Set(
+    fontesDaMarca.filter((f) => f.tipo === "citada").map((f) => f.execucao_id)
   );
 
   return {
-    execucoesComFontePropria: execucoesComFontePropria.size,
+    execucoesComFonteConsultada: execucoesComFonteConsultada.size,
+    execucoesComFonteCitada: execucoesComFonteCitada.size,
     totalExecucoes,
-    percentual: (execucoesComFontePropria.size / totalExecucoes) * 100,
+    percentualConsultada: (execucoesComFonteConsultada.size / totalExecucoes) * 100,
+    percentualCitada: (execucoesComFonteCitada.size / totalExecucoes) * 100,
   };
 }
 
@@ -351,19 +371,23 @@ export function calcularResumoFontes(
     ordenada.forEach((f, i) => ordemPorFonteId.set(f.id, i + 1));
   }
 
-  const grupos = new Map<string, Fonte[]>();
+  // Agrupa por (chave, tipo) — não só por chave. Uma mesma URL/domínio pode
+  // ter sido "consultada" numa execução e "citada" em outra; juntar as duas
+  // num grupo só escondia uma das duas (ficava só o tipo da primeira
+  // ocorrência encontrada). Agora viram duas linhas, uma por tipo.
+  const grupos = new Map<string, { chave: string; tipo: string | null; lista: Fonte[] }>();
   for (const f of fontes) {
     const chave = modo === "url" ? f.url ?? f.dominio ?? "—" : f.dominio ?? "—";
-    const lista = grupos.get(chave) ?? [];
-    lista.push(f);
-    grupos.set(chave, lista);
+    const chaveGrupo = `${chave} ${f.tipo ?? ""}`;
+    const grupo = grupos.get(chaveGrupo) ?? { chave, tipo: f.tipo, lista: [] };
+    grupo.lista.push(f);
+    grupos.set(chaveGrupo, grupo);
   }
 
-  return Array.from(grupos.entries())
-    .map(([chave, lista]) => {
+  return Array.from(grupos.values())
+    .map(({ chave, tipo, lista }) => {
       const dominio = lista.find((f) => f.dominio)?.dominio ?? "—";
       const titulo = lista.find((f) => f.titulo)?.titulo ?? null;
-      const tipo = lista.find((f) => f.tipo)?.tipo ?? null;
       const ordens = lista
         .map((f) => ordemPorFonteId.get(f.id))
         .filter((v): v is number => v !== undefined);

@@ -6,13 +6,19 @@ interface StatCardProps {
   sublabel: string;
   value: string;
   delta?: number | null;
-  accent?: "amber" | "teal";
+  accent?: "amber" | "teal" | "rose";
   /** Fração que originou o %, ex: 12 execuções de 72 mencionam a marca. */
   frac?: { parte: number; total: number; descricao: string };
 }
 
+const ACCENT_COLORS: Record<"amber" | "teal" | "rose", string> = {
+  amber: "#C9973E",
+  teal: "#1E9E86",
+  rose: "#D6455F",
+};
+
 export function StatCard({ label, sublabel, value, delta, accent = "amber", frac }: StatCardProps) {
-  const accentColor = accent === "amber" ? "#C9973E" : "#1E9E86";
+  const accentColor = ACCENT_COLORS[accent];
   const pct = frac && frac.total > 0 ? (frac.parte / frac.total) * 100 : 0;
 
   return (
