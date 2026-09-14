@@ -1,3 +1,23 @@
+/**
+ * Quebra a série em trechos contínuos, cortando nos pontos `null` (dias sem
+ * nenhuma coleta) — assim o SVG desenha uma lacuna de verdade ali, em vez de
+ * uma linha reta ligando o antes e o depois como se fosse dado real.
+ */
+function segmentosContinuos(pontos: (number | null)[]): [number, number][][] {
+  const segmentos: [number, number][][] = [];
+  let atual: [number, number][] = [];
+  pontos.forEach((v, i) => {
+    if (v === null) {
+      if (atual.length > 0) segmentos.push(atual);
+      atual = [];
+    } else {
+      atual.push([i, v]);
+    }
+  });
+  if (atual.length > 0) segmentos.push(atual);
+  return segmentos;
+}
+
 export function MultiLineChart({
   datas,
   series,
@@ -7,12 +27,12 @@ export function MultiLineChart({
   onFocar,
 }: {
   datas: string[];
-  series: { marcaId: string; nome: string; pontos: number[] }[];
+  series: { marcaId: string; nome: string; pontos: (number | null)[] }[];
   cores: Map<string, string>;
   height?: number;
-  /** marcaId em destaque (clicado na legenda) — as outras linhas ficam esmaecidas. */
+  /** marcaId em destaque (clicado na legenda ou na linha) — as outras linhas ficam esmaecidas. */
   emFoco?: string | null;
-  /** Clique no nome na legenda: destaca essa marca (clicar de novo tira o destaque). */
+  /** Clique no nome na legenda ou na própria linha: destaca essa marca (clicar de novo tira o destaque). */
   onFocar?: (id: string) => void;
 }) {
   const width = 640;
@@ -55,20 +75,51 @@ export function MultiLineChart({
 
           {series.map((s) => {
             const cor = cores.get(s.marcaId) ?? "#8FA0BA";
-            const pontosStr = s.pontos.map((v, i) => `${x(i)},${y(v)}`).join(" ");
             const emDestaque = !emFoco || s.marcaId === emFoco;
+            const largura = emFoco && s.marcaId === emFoco ? 3 : 2;
+            const opacidade = emDestaque ? 1 : 0.15;
+            const segmentos = segmentosContinuos(s.pontos);
             return (
-              <polyline
+              <g
                 key={s.marcaId}
-                points={pontosStr}
-                fill="none"
-                stroke={cor}
-                strokeWidth={emFoco && s.marcaId === emFoco ? 3 : 2}
-                strokeOpacity={emDestaque ? 1 : 0.15}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                style={{ transition: "stroke-opacity 150ms, stroke-width 150ms" }}
-              />
+                style={{ transition: "opacity 150ms", cursor: onFocar ? "pointer" : undefined }}
+                opacity={opacidade}
+                onClick={() => onFocar?.(s.marcaId)}
+              >
+                {segmentos.map((seg, si) =>
+                  seg.length === 1 ? (
+                    // Um único dia de dado isolado entre lacunas — sem isso ficaria invisível,
+                    // já que uma polyline de 1 ponto não desenha nada. O círculo maior e
+                    // transparente por baixo aumenta a área de clique sem alterar o visual.
+                    <g key={si}>
+                      <circle cx={x(seg[0][0])} cy={y(seg[0][1])} r={9} fill="transparent" />
+                      <circle cx={x(seg[0][0])} cy={y(seg[0][1])} r={3} fill={cor} />
+                    </g>
+                  ) : (
+                    <g key={si}>
+                      {/* Traço largo e invisível por baixo só pra facilitar o clique —
+                          a linha visível em si é fina demais pra ser um alvo confortável. */}
+                      <polyline
+                        points={seg.map(([i, v]) => `${x(i)},${y(v)}`).join(" ")}
+                        fill="none"
+                        stroke="transparent"
+                        strokeWidth={16}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <polyline
+                        points={seg.map(([i, v]) => `${x(i)},${y(v)}`).join(" ")}
+                        fill="none"
+                        stroke={cor}
+                        strokeWidth={largura}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        style={{ pointerEvents: "none" }}
+                      />
+                    </g>
+                  )
+                )}
+              </g>
             );
           })}
         </g>
