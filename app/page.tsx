@@ -20,6 +20,7 @@ import {
 import { Marca, DominioProprio, Prompt, Execucao, Fonte, Mencao } from "@/lib/types";
 import { StatCard } from "@/components/StatCard";
 import { BrandSwitcher, RangeSwitcher, PromptSwitcher } from "@/components/TopControls";
+import { useFiltrosGlobais } from "@/components/FiltrosGlobaisProvider";
 import { RankingTable } from "@/components/RankingTable";
 import { BreakdownTable } from "@/components/BreakdownTable";
 import { IconRefresh } from "@/components/icons";
@@ -38,10 +39,11 @@ export default function DashboardPage() {
   const [mencoesAnterior, setMencoesAnterior] = useState<Mencao[]>([]);
   const [fontesAnterior, setFontesAnterior] = useState<Fonte[]>([]);
 
-  const [diasRange, setDiasRange] = useState(7);
-  const [marcaSelecionada, setMarcaSelecionada] = useState<string | null>(null);
+  // marca/prompt/período são compartilhados entre as páginas (LAB-1056) — vivem
+  // no FiltrosGlobaisProvider, não como useState local daqui.
+  const { marcaSelecionada, setMarcaSelecionada, promptSelecionado, setPromptSelecionado, diasRange, setDiasRange } =
+    useFiltrosGlobais();
   const [dimensaoDetalhamento, setDimensaoDetalhamento] = useState<DimensaoDetalhamento>("modelo");
-  const [promptSelecionado, setPromptSelecionado] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {

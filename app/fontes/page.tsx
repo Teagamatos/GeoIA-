@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   getMarcas,
   getPrompts,
@@ -8,15 +8,17 @@ import {
   getFontesPorExecucoes,
   getMencoesPorExecucoes,
   calcularResumoFontes,
+  listarOcorrenciasDeFonte,
   ModoAgrupamentoFonte,
   ResumoFonte,
   rangeDias,
 } from "@/lib/queries";
-import { Marca, Prompt } from "@/lib/types";
+import { Marca, Prompt, Execucao, Fonte, PROVIDER_LABELS } from "@/lib/types";
 import { mapaCoresPorMarca } from "@/lib/color";
 import { RangeSwitcher, PromptSwitcher } from "@/components/TopControls";
 import { MarcaBadge } from "@/components/MarcaBadge";
 import { IconCaretDown, IconCaretUp } from "@/components/icons";
+import { useFiltrosGlobais } from "@/components/FiltrosGlobaisProvider";
 
 type SortKey = "chave" | "citadaPct" | "aparicoes" | "ordemMedia" | "vistoPorUltimo";
 
@@ -28,20 +30,30 @@ export default function FontesPage() {
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [resumos, setResumos] = useState<ResumoFonte[]>([]);
   const [totalExecucoes, setTotalExecucoes] = useState(0);
+  // Dados brutos do período, guardados só pra alimentar o drill-down "em quais
+  // prompts essa fonte aparece" (calcularResumoFontes já agrega tudo, mas o
+  // drill-down precisa voltar pras execuções originais).
+  const [execucoesRaw, setExecucoesRaw] = useState<Execucao[]>([]);
+  const [fontesRaw, setFontesRaw] = useState<Fonte[]>([]);
 
-  const [diasRange, setDiasRange] = useState(30);
-  const [promptSelecionado, setPromptSelecionado] = useState<string | null>(null);
+  // diasRange/promptSelecionado são compartilhados com as outras páginas (LAB-1056),
+  // via FiltrosGlobaisProvider — não são mais um useState só desta página.
+  const { promptSelecionado, setPromptSelecionado, diasRange, setDiasRange } = useFiltrosGlobais();
   const [modo, setModo] = useState<ModoAgrupamentoFonte>("url");
   const [filtro, setFiltro] = useState("");
   const [tipoFiltro, setTipoFiltro] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("aparicoes");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  // Linha com o drill-down aberto — guardo {chave, tipo} em vez de uma string
+  // concatenada pra não ter que decidir um separador que nunca apareça numa URL.
+  const [linhaAberta, setLinhaAberta] = useState<{ chave: string; tipo: string | null } | null>(null);
 
   useEffect(() => {
     let cancelado = false;
     async function carregar() {
       setCarregando(true);
       setErro(null);
+      setLinhaAberta(null); // os dados vão mudar — evita mostrar drill-down de um período/filtro antigo
       try {
         const { inicio, fim } = rangeDias(diasRange);
         const [marcasData, promptsData, execsPeriodo] = await Promise.all([
@@ -61,6 +73,8 @@ export default function FontesPage() {
         setMarcas(marcasData);
         setPrompts(promptsData);
         setTotalExecucoes(execs.length);
+        setExecucoesRaw(execs);
+        setFontesRaw(fontes);
         setResumos(calcularResumoFontes(modo, execs, fontes, mencoes));
       } catch (e: any) {
         if (!cancelado) setErro(e.message ?? "Erro ao carregar fontes.");
@@ -156,6 +170,13 @@ export default function FontesPage() {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8);
   }, [resumos]);
+
+  // Ocorrências (prompt × provider × data) da linha com drill-down aberto —
+  // recalcula só quando alguém abre/troca a linha, não a cada render da tabela.
+  const ocorrenciasAbertas = useMemo(() => {
+    if (!linhaAberta) return [];
+    return listarOcorrenciasDeFonte(linhaAberta.chave, linhaAberta.tipo, modo, execucoesRaw, fontesRaw, prompts);
+  }, [linhaAberta, modo, execucoesRaw, fontesRaw, prompts]);
 
   const colunas: { key: SortKey; label: string; align: "left" | "right" }[] = [
     { key: "chave", label: modo === "url" ? "URL" : "Domínio", align: "left" },
@@ -312,11 +333,15 @@ export default function FontesPage() {
                 ))}
                 <th className="px-4 py-3 font-normal text-left">Tipo</th>
                 <th className="px-4 py-3 font-normal text-left">Marcas</th>
+                <th className="px-4 py-3 font-normal text-left">Prompts</th>
               </tr>
             </thead>
             <tbody>
-              {ordenados.map((r) => (
-                <tr key={`${r.chave}::${r.tipo ?? ""}`} className="border-b border-surface-100 last:border-0">
+              {ordenados.map((r) => {
+                const aberta = linhaAberta?.chave === r.chave && linhaAberta?.tipo === r.tipo;
+                return (
+                <Fragment key={`${r.chave}::${r.tipo ?? ""}`}>
+                <tr className="border-b border-surface-100 last:border-0">
                   <td className="px-4 py-3 max-w-xs">
                     <a
                       href={modo === "url" ? r.chave : `https://${r.dominio}`}
@@ -361,8 +386,54 @@ export default function FontesPage() {
                       <span className="text-xs text-slate-400">—</span>
                     )}
                   </td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={() =>
+                        setLinhaAberta((atual) =>
+                          atual && atual.chave === r.chave && atual.tipo === r.tipo
+                            ? null
+                            : { chave: r.chave, tipo: r.tipo }
+                        )
+                      }
+                      className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-slate-500 hover:bg-surface-100 hover:text-slate-900 whitespace-nowrap"
+                      title="Ver em quais prompts essa fonte aparece"
+                    >
+                      Ver prompts
+                      {aberta ? <IconCaretUp className="h-3 w-3" /> : <IconCaretDown className="h-3 w-3" />}
+                    </button>
+                  </td>
                 </tr>
-              ))}
+                {aberta && (
+                  <tr className="border-b border-surface-100 last:border-0 bg-surface-50">
+                    <td colSpan={colunas.length + 3} className="px-4 py-3">
+                      {ocorrenciasAbertas.length === 0 ? (
+                        <p className="text-xs text-slate-500">
+                          Não achei nenhuma execução dessa fonte nesse período — pode ter sido
+                          removida do filtro atual (prompt selecionado, período) desde que a tabela
+                          carregou.
+                        </p>
+                      ) : (
+                        <ul className="space-y-1.5">
+                          {ocorrenciasAbertas.map((o) => (
+                            <li
+                              key={o.execucaoId}
+                              className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs"
+                            >
+                              <span className="text-slate-900">{o.promptTexto}</span>
+                              <span className="text-slate-500 whitespace-nowrap">
+                                · {PROVIDER_LABELS[o.provider] ?? o.provider} ·{" "}
+                                {new Date(o.dataExecucao).toLocaleDateString("pt-BR")}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
