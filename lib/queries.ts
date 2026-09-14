@@ -1,62 +1,126 @@
 import { supabase } from "./supabase";
 import { Marca, MarcaAlias, DominioProprio, Prompt, Execucao, Fonte, Mencao, PROVIDER_LABELS } from "./types";
 
+// ---------- Cache leve pra troca de página não parecer que está "carregando" de novo ----------
+
+/**
+ * O volume de dados aqui é pequeno (dezenas de execuções, ~100 marcas) — o banco
+ * responde em milissegundos. O delay que dá a sensação de "travou" ao trocar de
+ * aba não é o Supabase sendo lento: é que cada página (Dashboard, Concorrentes,
+ * Fontes, Prompts) é desmontada e remontada do zero pelo Next.js a cada
+ * navegação, e sem nenhuma memória do que já buscou, ela refaz a mesma consulta
+ * de novo — e a viagem de rede até o Supabase (que essa sim tem uma latência
+ * perceptível) acontece de novo, com o skeleton de "carregando" aparecendo cada
+ * vez, mesmo que o dado não tenha mudado nesse meio-tempo.
+ *
+ * Esse cache guarda o resultado (na verdade, a Promise, o que também deduplica
+ * chamadas concorrentes idênticas) por um TTL curto — o suficiente pra absorver
+ * ida-e-volta entre páginas na mesma sessão do navegador, não pra evitar buscar
+ * dado de verdade por muito tempo. Fica só na memória da aba (não é
+ * localStorage): um F5 sempre busca fresco.
+ */
+const CACHE_TTL_MS = 20_000;
+const cacheConsultas = new Map<string, { promessa: Promise<any>; buscadoEm: number }>();
+
+function comCache<T>(chave: string, buscar: () => Promise<T>): Promise<T> {
+  const cacheado = cacheConsultas.get(chave);
+  if (cacheado && Date.now() - cacheado.buscadoEm < CACHE_TTL_MS) {
+    return cacheado.promessa as Promise<T>;
+  }
+  const promessa = buscar().catch((erro) => {
+    cacheConsultas.delete(chave); // não guarda erro em cache, senão a página fica presa nele até o TTL passar
+    throw erro;
+  });
+  cacheConsultas.set(chave, { promessa, buscadoEm: Date.now() });
+  return promessa;
+}
+
+/**
+ * Invalida uma entrada específica do cache acima — chamado depois de qualquer
+ * mutação (editar/arquivar marca ou prompt, cadastrar concorrente, etc.) pra
+ * garantir que a próxima leitura veja o dado novo, em vez de esperar o TTL
+ * passar. Sem argumento, limpa tudo.
+ */
+export function invalidarCache(chave?: string): void {
+  if (!chave) {
+    cacheConsultas.clear();
+    return;
+  }
+  cacheConsultas.delete(chave);
+}
+
 export async function getMarcas(): Promise<Marca[]> {
-  const { data, error } = await supabase.from("geo_marca").select("*").order("nome");
-  if (error) throw error;
-  return data ?? [];
+  return comCache("marcas", async () => {
+    const { data, error } = await supabase.from("geo_marca").select("*").order("nome");
+    if (error) throw error;
+    return data ?? [];
+  });
 }
 
 export async function getMarcaAliases(): Promise<MarcaAlias[]> {
-  const { data, error } = await supabase.from("geo_marca_alias").select("*");
-  if (error) throw error;
-  return data ?? [];
+  return comCache("marcaAliases", async () => {
+    const { data, error } = await supabase.from("geo_marca_alias").select("*");
+    if (error) throw error;
+    return data ?? [];
+  });
 }
 
 export async function getDominiosProprios(): Promise<DominioProprio[]> {
-  const { data, error } = await supabase.from("geo_dominio_proprio").select("*");
-  if (error) throw error;
-  return data ?? [];
+  return comCache("dominiosProprios", async () => {
+    const { data, error } = await supabase.from("geo_dominio_proprio").select("*");
+    if (error) throw error;
+    return data ?? [];
+  });
 }
 
 export async function getPrompts(): Promise<Prompt[]> {
-  const { data, error } = await supabase
-    .from("geo_prompt")
-    .select("*")
-    .order("created_at", { ascending: false });
-  if (error) throw error;
-  return data ?? [];
+  return comCache("prompts", async () => {
+    const { data, error } = await supabase
+      .from("geo_prompt")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    return data ?? [];
+  });
 }
 
 export async function getExecucoesEntre(dataInicio: string, dataFim: string): Promise<Execucao[]> {
-  const { data, error } = await supabase
-    .from("geo_execucao")
-    .select("*")
-    .gte("data_execucao", dataInicio)
-    .lte("data_execucao", dataFim)
-    .order("data_execucao", { ascending: true });
-  if (error) throw error;
-  return data ?? [];
+  return comCache(`execucoes:${dataInicio}:${dataFim}`, async () => {
+    const { data, error } = await supabase
+      .from("geo_execucao")
+      .select("*")
+      .gte("data_execucao", dataInicio)
+      .lte("data_execucao", dataFim)
+      .order("data_execucao", { ascending: true });
+    if (error) throw error;
+    return data ?? [];
+  });
 }
 
 export async function getMencoesPorExecucoes(execucaoIds: string[]): Promise<Mencao[]> {
   if (execucaoIds.length === 0) return [];
-  const { data, error } = await supabase
-    .from("geo_mencao")
-    .select("*")
-    .in("execucao_id", execucaoIds);
-  if (error) throw error;
-  return data ?? [];
+  const chave = `mencoes:${[...execucaoIds].sort().join(",")}`;
+  return comCache(chave, async () => {
+    const { data, error } = await supabase
+      .from("geo_mencao")
+      .select("*")
+      .in("execucao_id", execucaoIds);
+    if (error) throw error;
+    return data ?? [];
+  });
 }
 
 export async function getFontesPorExecucoes(execucaoIds: string[]): Promise<Fonte[]> {
   if (execucaoIds.length === 0) return [];
-  const { data, error } = await supabase
-    .from("geo_fonte")
-    .select("*")
-    .in("execucao_id", execucaoIds);
-  if (error) throw error;
-  return data ?? [];
+  const chave = `fontes:${[...execucaoIds].sort().join(",")}`;
+  return comCache(chave, async () => {
+    const { data, error } = await supabase
+      .from("geo_fonte")
+      .select("*")
+      .in("execucao_id", execucaoIds);
+    if (error) throw error;
+    return data ?? [];
+  });
 }
 
 // ---------- Helpers de data ----------
@@ -78,6 +142,23 @@ export function rangeAnterior(dias: number): { inicio: string; fim: string } {
   const inicio = new Date();
   inicio.setDate(inicio.getDate() - dias * 2 + 1);
   return { inicio: toISODate(inicio), fim: toISODate(fim) };
+}
+
+/**
+ * Todas as datas (YYYY-MM-DD) entre início e fim, inclusive — preenche também os
+ * dias sem nenhuma execução. Sem isso, um gráfico que só desenha os dias que
+ * aparecem em `execucoes` comprime o eixo e esconde exatamente o buraco que a
+ * gente quer mostrar (período sem coleta), em vez de deixar ele visível.
+ */
+export function todasAsDatasEntre(inicio: string, fim: string): string[] {
+  const datas: string[] = [];
+  const atual = new Date(`${inicio}T00:00:00Z`);
+  const limite = new Date(`${fim}T00:00:00Z`);
+  while (atual <= limite) {
+    datas.push(toISODate(atual));
+    atual.setUTCDate(atual.getUTCDate() + 1);
+  }
+  return datas;
 }
 
 // ---------- Métricas ----------
@@ -244,6 +325,14 @@ export interface CelulaHeatmap {
   respostas: number;
   mencoes: number;
   visibilidade: number;
+  /**
+   * Nenhuma das execuções dessa célula disparou busca web (todas com
+   * `buscou_web` falso/null). Isso é um caso diferente de "0% de
+   * visibilidade": ali o modelo respondeu sem nem pesquisar, então 0% não
+   * significa que a marca perdeu — significa que não teve como aparecer.
+   * Quem renderiza a célula deve distinguir visualmente os dois casos.
+   */
+  semBuscaWeb: boolean;
 }
 
 /**
@@ -275,6 +364,7 @@ export function calcularHeatmapPrompts(
       respostas: execs.length,
       mencoes: mencoesCount,
       visibilidade: execs.length > 0 ? (mencoesCount / execs.length) * 100 : 0,
+      semBuscaWeb: execs.every((e) => !e.buscou_web),
     });
   }
   return resultado;
@@ -283,16 +373,30 @@ export function calcularHeatmapPrompts(
 export interface SeriePorMarca {
   marcaId: string;
   nome: string;
-  pontos: number[]; // visibilidade % por dia, alinhado com `datas`
+  /**
+   * Visibilidade % por dia, alinhado com `datas`. `null` num dia = não teve
+   * nenhuma execução (de nenhuma marca) naquele dia — período sem coleta, que
+   * quem desenha o gráfico deve tratar como uma lacuna na linha, não como um
+   * 0% (0% real é quando teve execução mas nenhuma menção à marca).
+   */
+  pontos: (number | null)[];
 }
 
-/** Visibilidade (%) por dia, para cada marca ativa, no conjunto de execuções dado. */
+/**
+ * Visibilidade (%) por dia, para cada marca ativa, no conjunto de execuções dado.
+ * `inicio`/`fim` definem o período pedido (ex: os mesmos 7/30/90 dias do filtro
+ * de período) — a série cobre TODOS os dias do período, não só os dias que
+ * aparecem em `execucoes`, senão um dia sem nenhuma coleta simplesmente
+ * desaparecia do eixo (comprimindo o gráfico) em vez de aparecer como buraco.
+ */
 export function calcularSerieVisibilidadePorMarca(
   marcas: Marca[],
   execucoes: Execucao[],
-  mencoes: Mencao[]
+  mencoes: Mencao[],
+  inicio: string,
+  fim: string
 ): { datas: string[]; series: SeriePorMarca[] } {
-  const datas = Array.from(new Set(execucoes.map((e) => e.data_execucao))).sort();
+  const datas = todasAsDatasEntre(inicio, fim);
 
   const totalPorDia = new Map<string, number>();
   for (const ex of execucoes) {
@@ -311,10 +415,11 @@ export function calcularSerieVisibilidadePorMarca(
           comMencaoPorDia.set(ex.data_execucao, (comMencaoPorDia.get(ex.data_execucao) ?? 0) + 1);
         }
       }
-      const pontos = datas.map((d) => {
+      const pontos = datas.map((d): number | null => {
         const total = totalPorDia.get(d) ?? 0;
+        if (total === 0) return null; // sem coleta nesse dia — lacuna, não 0%
         const com = comMencaoPorDia.get(d) ?? 0;
-        return total > 0 ? (com / total) * 100 : 0;
+        return (com / total) * 100;
       });
       return { marcaId: marca.id, nome: marca.nome, pontos };
     });
@@ -415,6 +520,56 @@ export function calcularResumoFontes(
     .sort((a, b) => b.aparicoes - a.aparicoes);
 }
 
+export interface OcorrenciaFonte {
+  execucaoId: string;
+  promptId: string | null;
+  promptTexto: string;
+  provider: string;
+  dataExecucao: string;
+}
+
+/**
+ * Drill-down de uma linha da tela de Fontes: lista as execuções (prompt,
+ * provider e data) em que aquela URL/domínio + tipo apareceu. `chave` e
+ * `tipo` são os mesmos de um `ResumoFonte` — precisam bater com a mesma
+ * lógica de agrupamento usada em `calcularResumoFontes` (por isso recebe
+ * `modo` também), senão o drill-down mistura "consultada" com "citada" na
+ * mesma lista.
+ */
+export function listarOcorrenciasDeFonte(
+  chave: string,
+  tipo: string | null,
+  modo: ModoAgrupamentoFonte,
+  execucoes: Execucao[],
+  fontes: Fonte[],
+  prompts: Prompt[]
+): OcorrenciaFonte[] {
+  const promptPorId = new Map(prompts.map((p) => [p.id, p]));
+  const execucaoPorId = new Map(execucoes.map((e) => [e.id, e]));
+
+  const execucaoIds = new Set<string>();
+  for (const f of fontes) {
+    const chaveFonte = modo === "url" ? f.url ?? f.dominio ?? "—" : f.dominio ?? "—";
+    if (chaveFonte === chave && f.tipo === tipo) execucaoIds.add(f.execucao_id);
+  }
+
+  const ocorrencias: OcorrenciaFonte[] = [];
+  execucaoIds.forEach((id) => {
+    const exec = execucaoPorId.get(id);
+    if (!exec) return;
+    const prompt = exec.prompt_id ? promptPorId.get(exec.prompt_id) : undefined;
+    ocorrencias.push({
+      execucaoId: exec.id,
+      promptId: exec.prompt_id,
+      promptTexto: prompt?.texto ?? "Prompt removido",
+      provider: exec.provider,
+      dataExecucao: exec.data_execucao,
+    });
+  });
+
+  return ocorrencias.sort((a, b) => b.dataExecucao.localeCompare(a.dataExecucao));
+}
+
 export interface FluxoFonteLink {
   dominio: string;
   marcaId: string;
@@ -473,6 +628,36 @@ export function calcularFluxoFontesPorMarca(
     .filter((l) => dominiosSet.has(l.dominio));
 
   return { dominios: topDominios, links };
+}
+
+/**
+ * `geo_execucao.queries_derivadas` é um jsonb sem formato fixo documentado —
+ * já vi chegar como array de strings e como array de objetos com a query num
+ * campo (`query`/`texto`/`q`). Normaliza pra uma lista de strings simples pra
+ * exibir na tela de Respostas, sem quebrar se o formato mudar de novo.
+ */
+export function normalizarQueriesDerivadas(valor: unknown): string[] {
+  if (!valor) return [];
+  let lista: unknown = valor;
+  if (typeof valor === "string") {
+    try {
+      lista = JSON.parse(valor);
+    } catch {
+      return [valor];
+    }
+  }
+  if (!Array.isArray(lista)) return [];
+  return lista
+    .map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") {
+        const obj = item as Record<string, unknown>;
+        const texto = obj.query ?? obj.texto ?? obj.q ?? obj.termo;
+        if (typeof texto === "string") return texto;
+      }
+      return null;
+    })
+    .filter((v): v is string => !!v && v.trim().length > 0);
 }
 
 export function tendencia(atual: number, anterior: number): "up" | "down" | "flat" {

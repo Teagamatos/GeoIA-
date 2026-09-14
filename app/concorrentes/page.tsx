@@ -11,12 +11,14 @@ import {
   calcularSerieVisibilidadePorMarca,
   calcularFluxoFontesPorMarca,
   rangeDias,
+  invalidarCache,
 } from "@/lib/queries";
 import { mapaCoresPorMarca } from "@/lib/color";
 import { IconPlus, IconArchive } from "@/components/icons";
 import { RangeSwitcher, PromptSwitcher } from "@/components/TopControls";
 import { MultiLineChart } from "@/components/MultiLineChart";
 import { SourceFlowSankey } from "@/components/SourceFlowSankey";
+import { useFiltrosGlobais } from "@/components/FiltrosGlobaisProvider";
 
 interface MarcaComAliases extends Marca {
   aliasesTexto: string;
@@ -30,9 +32,13 @@ export default function ConcorrentesPage() {
   const [erro, setErro] = useState<string | null>(null);
   const [novoNome, setNovoNome] = useState("");
   const [salvando, setSalvando] = useState(false);
+  // Aviso quando o nome digitado colide com uma marca própria (nome ou alias) —
+  // não bloqueia, só pede confirmação antes de cadastrar mesmo assim.
+  const [avisoColisao, setAvisoColisao] = useState<string | null>(null);
 
-  const [diasRange, setDiasRange] = useState(30);
-  const [promptSelecionado, setPromptSelecionado] = useState<string | null>(null);
+  // diasRange/promptSelecionado são compartilhados com as outras páginas (LAB-1056),
+  // via FiltrosGlobaisProvider — não são mais um useState só desta página.
+  const { promptSelecionado, setPromptSelecionado, diasRange, setDiasRange } = useFiltrosGlobais();
   // Marca destacada ao clicar no nome dela no gráfico de linhas ou no Sankey (aba Visão geral).
   // Clicar de novo na mesma marca tira o destaque.
   const [marcaEmFoco, setMarcaEmFoco] = useState<string | null>(null);
@@ -105,9 +111,12 @@ export default function ConcorrentesPage() {
 
   const coresPorMarca = useMemo(() => mapaCoresPorMarca(marcas), [marcas]);
 
+  // A série cobre o período inteiro (não só os dias que tiveram execução) pra
+  // um dia sem nenhuma coleta virar uma lacuna real no gráfico, não um "pulo".
+  const { inicio: inicioSerie, fim: fimSerie } = rangeDias(diasRange);
   const { datas, series } = useMemo(
-    () => calcularSerieVisibilidadePorMarca(marcas, execucoes, mencoes),
-    [marcas, execucoes, mencoes]
+    () => calcularSerieVisibilidadePorMarca(marcas, execucoes, mencoes, inicioSerie, fimSerie),
+    [marcas, execucoes, mencoes, inicioSerie, fimSerie]
   );
 
   const fluxoFontes = useMemo(
@@ -115,8 +124,49 @@ export default function ConcorrentesPage() {
     [fontes, mencoes, marcas]
   );
 
-  async function adicionarConcorrente() {
+  function normalizarNome(s: string): string {
+    return s
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .trim();
+  }
+
+  // Confere se o nome digitado bate (ou já foi cadastrado como alias) com uma
+  // marca PRÓPRIA — não com outro concorrente, já que dois concorrentes com
+  // nome parecido é só coincidência de mercado, mas colidir com a holding é
+  // provavelmente erro de digitação ou duplicidade.
+  function encontrarColisaoComPropria(nome: string): MarcaComAliases | null {
+    const normalizado = normalizarNome(nome);
+    return (
+      marcas.find((m) => {
+        if (m.tipo !== "propria") return false;
+        if (normalizarNome(m.nome) === normalizado) return true;
+        const aliases = m.aliasesTexto
+          .split(",")
+          .map((a) => normalizarNome(a))
+          .filter(Boolean);
+        return aliases.includes(normalizado);
+      }) ?? null
+    );
+  }
+
+  function adicionarConcorrente() {
     if (!novoNome.trim()) return;
+    setErro(null);
+
+    const colisao = encontrarColisaoComPropria(novoNome);
+    if (colisao) {
+      setAvisoColisao(
+        `"${novoNome.trim()}" bate com o nome (ou um alias) da marca própria "${colisao.nome}". Confirma que é um concorrente diferente mesmo?`
+      );
+      return; // não insere ainda — espera confirmar no aviso abaixo
+    }
+
+    inserirConcorrente();
+  }
+
+  async function inserirConcorrente() {
     setSalvando(true);
     setErro(null);
     const { error } = await supabase
@@ -128,6 +178,8 @@ export default function ConcorrentesPage() {
       return;
     }
     setNovoNome("");
+    setAvisoColisao(null);
+    invalidarCache("marcas"); // outras páginas (Dashboard, Fontes, Prompts) usam getMarcas() em cache
     carregar();
   }
 
@@ -138,12 +190,14 @@ export default function ConcorrentesPage() {
   async function salvarCampo(id: string, campo: "nome" | "tipo", valor: string) {
     const { error } = await supabase.from("geo_marca").update({ [campo]: valor }).eq("id", id);
     if (error) setErro(error.message);
+    else invalidarCache("marcas");
   }
 
   async function alternarAtivo(m: MarcaComAliases) {
     setMarcas((prev) => prev.map((x) => (x.id === m.id ? { ...x, ativo: !x.ativo } : x)));
     const { error } = await supabase.from("geo_marca").update({ ativo: !m.ativo }).eq("id", m.id);
     if (error) setErro(error.message);
+    else invalidarCache("marcas");
   }
 
   function editarAliasesTexto(id: string, texto: string) {
@@ -176,6 +230,7 @@ export default function ConcorrentesPage() {
         .from("geo_marca_alias")
         .insert(paraAdicionar.map((alias) => ({ marca_id: m.id, alias })));
     }
+    if (paraRemover.length > 0 || paraAdicionar.length > 0) invalidarCache("marcaAliases");
   }
 
   // Arquivar nunca apaga a linha em geo_marca: só marca ativo=false. geo_mencao, geo_marca_alias
@@ -187,6 +242,8 @@ export default function ConcorrentesPage() {
     if (error) {
       setErro(error.message);
       carregar();
+    } else {
+      invalidarCache("marcas");
     }
   }
 
@@ -294,6 +351,27 @@ export default function ConcorrentesPage() {
               Adicionar concorrente
             </button>
           </div>
+
+          {avisoColisao && (
+            <div className="mb-8 rounded-card border border-signal-amber/40 bg-signal-amber/10 px-4 py-3 text-sm text-ink-950 flex flex-wrap items-center justify-between gap-3">
+              <span>{avisoColisao}</span>
+              <div className="flex gap-2 shrink-0">
+                <button
+                  onClick={() => setAvisoColisao(null)}
+                  className="rounded-md px-3 py-1.5 text-xs text-slate-700 hover:bg-surface-100"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={inserirConcorrente}
+                  disabled={salvando}
+                  className="rounded-md bg-signal-amber px-3 py-1.5 text-xs font-medium text-ink-950 disabled:opacity-40"
+                >
+                  Cadastrar mesmo assim
+                </button>
+              </div>
+            </div>
+          )}
 
           {carregando ? (
             <div className="animate-pulse h-40 rounded-card bg-surface-50" />

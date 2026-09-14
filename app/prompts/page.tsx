@@ -10,10 +10,12 @@ import {
   calcularHeatmapPrompts,
   rangeDias,
   CelulaHeatmap,
+  invalidarCache,
 } from "@/lib/queries";
 import { corVisibilidade } from "@/lib/color";
 import { IconPlus, IconArchive } from "@/components/icons";
 import { BrandSwitcher, RangeSwitcher } from "@/components/TopControls";
+import { useFiltrosGlobais } from "@/components/FiltrosGlobaisProvider";
 
 const VAZIO = { texto: "", categoria: "", persona: "", pais: "", cidade: "" };
 const PROVIDERS_ORDEM = Object.keys(PROVIDER_LABELS);
@@ -27,8 +29,9 @@ export default function PromptsPage() {
 
   const [visualizacao, setVisualizacao] = useState<"tabela" | "heatmap">("tabela");
   const [marcas, setMarcas] = useState<Marca[]>([]);
-  const [marcaSelecionada, setMarcaSelecionada] = useState<string | null>(null);
-  const [diasRange, setDiasRange] = useState(7);
+  // marcaSelecionada/diasRange são compartilhados com Dashboard/Concorrentes/Fontes
+  // (LAB-1056), via FiltrosGlobaisProvider — não são mais um useState só desta página.
+  const { marcaSelecionada, setMarcaSelecionada, diasRange, setDiasRange } = useFiltrosGlobais();
   const [execucoesHeatmap, setExecucoesHeatmap] = useState<Execucao[]>([]);
   const [mencoesHeatmap, setMencoesHeatmap] = useState<Mencao[]>([]);
   const [carregandoHeatmap, setCarregandoHeatmap] = useState(false);
@@ -48,9 +51,14 @@ export default function PromptsPage() {
     carregar();
     getMarcas().then((data) => {
       setMarcas(data);
-      const primeira = data.find((m) => m.tipo === "propria" && m.ativo);
-      if (primeira) setMarcaSelecionada(primeira.id);
+      // Só define a marca padrão se ainda não tiver nenhuma vinda do filtro
+      // global (outra página) — senão isso pisava numa marca já escolhida.
+      if (!marcaSelecionada) {
+        const primeira = data.find((m) => m.tipo === "propria" && m.ativo);
+        if (primeira) setMarcaSelecionada(primeira.id);
+      }
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -102,6 +110,7 @@ export default function PromptsPage() {
       return;
     }
     setNovo(VAZIO);
+    invalidarCache("prompts"); // Concorrentes e Fontes usam getPrompts() em cache
     carregar();
   }
 
@@ -109,6 +118,7 @@ export default function PromptsPage() {
     setPrompts((prev) => prev.map((x) => (x.id === p.id ? { ...x, ativo: !x.ativo } : x)));
     const { error } = await supabase.from("geo_prompt").update({ ativo: !p.ativo }).eq("id", p.id);
     if (error) setErro(error.message);
+    else invalidarCache("prompts");
   }
 
   async function editarTexto(p: Prompt, texto: string) {
@@ -118,6 +128,25 @@ export default function PromptsPage() {
   async function salvarTexto(p: Prompt) {
     const { error } = await supabase.from("geo_prompt").update({ texto: p.texto }).eq("id", p.id);
     if (error) setErro(error.message);
+    else invalidarCache("prompts");
+  }
+
+  // Categoria/Persona/País/Cidade não tinham edição depois de criado — só dava pra
+  // criar e depois arquivar/reativar. Mesmo padrão de "edita local, salva no blur"
+  // já usado em editarTexto/salvarTexto acima e nos aliases de Concorrentes.
+  type CampoPrompt = "categoria" | "persona" | "pais" | "cidade";
+
+  function editarCampo(p: Prompt, campo: CampoPrompt, valor: string) {
+    setPrompts((prev) => prev.map((x) => (x.id === p.id ? { ...x, [campo]: valor } : x)));
+  }
+
+  async function salvarCampo(p: Prompt, campo: CampoPrompt, valor: string) {
+    const { error } = await supabase
+      .from("geo_prompt")
+      .update({ [campo]: valor.trim() || null })
+      .eq("id", p.id);
+    if (error) setErro(error.message);
+    else invalidarCache("prompts");
   }
 
   // Arquivar NUNCA apaga a linha em geo_prompt: só marca ativo=false (mesmo campo que já
@@ -129,6 +158,8 @@ export default function PromptsPage() {
     if (error) {
       setErro(error.message);
       carregar();
+    } else {
+      invalidarCache("prompts");
     }
   }
 
@@ -207,7 +238,14 @@ export default function PromptsPage() {
                 <tbody>
                   {prompts.map((p) => (
                     <tr key={p.id} className="border-b border-surface-100 last:border-0">
-                      <td className="px-5 py-3 text-slate-900 max-w-xs align-top">{p.texto}</td>
+                      <td className="px-5 py-3 text-slate-900 max-w-xs align-top">
+                        {p.texto}
+                        {!p.ativo && (
+                          <span className="ml-2 rounded-full bg-surface-100 px-2 py-0.5 text-xs text-slate-500 whitespace-nowrap">
+                            Arquivado
+                          </span>
+                        )}
+                      </td>
                       {PROVIDERS_ORDEM.map((provider) => {
                         const celula = heatmap.get(`${p.id}::${provider}`);
                         if (!celula) {
@@ -215,6 +253,22 @@ export default function PromptsPage() {
                             <td key={provider} className="px-3 py-3 text-center">
                               <span className="inline-block rounded-md px-2 py-1 text-xs text-slate-400 bg-surface-50">
                                 —
+                              </span>
+                            </td>
+                          );
+                        }
+                        // "Sem busca web" é diferente de 0% de visibilidade: ali o modelo
+                        // respondeu sem nem pesquisar, então não teve como a marca aparecer —
+                        // não é a marca "perdendo", é a busca nem tendo rodado. Por isso um
+                        // estado visual neutro (cinza), não a cor vermelha de 0%.
+                        if (celula.semBuscaWeb) {
+                          return (
+                            <td key={provider} className="px-3 py-3 text-center">
+                              <span
+                                className="inline-block min-w-[3.5rem] rounded-md px-2 py-1 text-xs text-slate-500 bg-surface-100"
+                                title={`${celula.respostas} resposta(s), nenhuma com busca web disparada — sem como a marca ter aparecido`}
+                              >
+                                sem busca
                               </span>
                             </td>
                           );
@@ -309,14 +363,35 @@ export default function PromptsPage() {
                   onChange={(texto) => editarTexto(p, texto)}
                   onBlur={() => salvarTexto(p)}
                 />
-                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-slate-500">
-                  {p.categoria && <span>{p.categoria}</span>}
-                  {p.persona && <span>{p.persona}</span>}
-                  {(p.pais || p.cidade) && (
-                    <span>
-                      {[p.cidade, p.pais].filter(Boolean).join(", ")}
-                    </span>
-                  )}
+                <div className="mt-1 flex flex-wrap items-center gap-x-1 gap-y-1 text-xs text-slate-500">
+                  <input
+                    value={p.categoria ?? ""}
+                    onChange={(e) => editarCampo(p, "categoria", e.target.value)}
+                    onBlur={(e) => salvarCampo(p, "categoria", e.target.value)}
+                    placeholder="Categoria"
+                    className="w-24 rounded bg-transparent px-1 py-0.5 placeholder:text-slate-400/70 focus:bg-surface-50 focus:text-slate-900"
+                  />
+                  <input
+                    value={p.persona ?? ""}
+                    onChange={(e) => editarCampo(p, "persona", e.target.value)}
+                    onBlur={(e) => salvarCampo(p, "persona", e.target.value)}
+                    placeholder="Persona"
+                    className="w-28 rounded bg-transparent px-1 py-0.5 placeholder:text-slate-400/70 focus:bg-surface-50 focus:text-slate-900"
+                  />
+                  <input
+                    value={p.cidade ?? ""}
+                    onChange={(e) => editarCampo(p, "cidade", e.target.value)}
+                    onBlur={(e) => salvarCampo(p, "cidade", e.target.value)}
+                    placeholder="Cidade"
+                    className="w-24 rounded bg-transparent px-1 py-0.5 placeholder:text-slate-400/70 focus:bg-surface-50 focus:text-slate-900"
+                  />
+                  <input
+                    value={p.pais ?? ""}
+                    onChange={(e) => editarCampo(p, "pais", e.target.value)}
+                    onBlur={(e) => salvarCampo(p, "pais", e.target.value)}
+                    placeholder="País (ex: BR)"
+                    className="w-20 rounded bg-transparent px-1 py-0.5 placeholder:text-slate-400/70 focus:bg-surface-50 focus:text-slate-900"
+                  />
                   {!p.ativo && (
                     <span className="rounded-full bg-surface-100 px-2 py-0.5 text-slate-500">Arquivado</span>
                   )}
