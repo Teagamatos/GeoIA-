@@ -23,11 +23,11 @@ function LoginConteudo() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-surface-50 px-4">
       <div className="w-full max-w-sm rounded-card border border-surface-200 bg-surface-0 p-8 shadow-sm">
-        <div className="mb-6 text-center">
-          <div className="font-display text-lg font-semibold text-slate-900 tracking-tight">
-            Foursales Company
-          </div>
-          <div className="text-xs text-slate-500 mt-0.5">Visibilidade em IA</div>
+        <div className="mb-6 flex flex-col items-center text-center">
+          {/* public/logo.png já traz o texto "The Foursales Company" desenhado —
+              por isso não repete o nome em texto ao lado, só o subtítulo. */}
+          <img src="/logo.png" alt="The Foursales Company" className="h-16 w-16 mb-2" />
+          <div className="text-xs text-slate-500">Visibilidade em IA</div>
         </div>
 
         <h1 className="font-display text-base font-semibold text-slate-900 text-center mb-1">
