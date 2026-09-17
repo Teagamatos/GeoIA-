@@ -8,7 +8,6 @@ import {
   getExecucoesEntre,
   getMencoesPorExecucoes,
   calcularHeatmapPrompts,
-  rangeDias,
   CelulaHeatmap,
   invalidarCache,
 } from "@/lib/queries";
@@ -29,9 +28,9 @@ export default function PromptsPage() {
 
   const [visualizacao, setVisualizacao] = useState<"tabela" | "heatmap">("tabela");
   const [marcas, setMarcas] = useState<Marca[]>([]);
-  // marcaSelecionada/diasRange são compartilhados com Dashboard/Concorrentes/Fontes
+  // marcaSelecionada/periodo são compartilhados com Dashboard/Concorrentes/Fontes
   // (LAB-1056), via FiltrosGlobaisProvider — não são mais um useState só desta página.
-  const { marcaSelecionada, setMarcaSelecionada, diasRange, setDiasRange } = useFiltrosGlobais();
+  const { marcaSelecionada, setMarcaSelecionada, periodo, setPeriodo } = useFiltrosGlobais();
   const [execucoesHeatmap, setExecucoesHeatmap] = useState<Execucao[]>([]);
   const [mencoesHeatmap, setMencoesHeatmap] = useState<Mencao[]>([]);
   const [carregandoHeatmap, setCarregandoHeatmap] = useState(false);
@@ -67,7 +66,7 @@ export default function PromptsPage() {
     async function carregarHeatmap() {
       setCarregandoHeatmap(true);
       try {
-        const { inicio, fim } = rangeDias(diasRange);
+        const { inicio, fim } = periodo;
         const execs = await getExecucoesEntre(inicio, fim);
         const mencs = await getMencoesPorExecucoes(execs.map((e) => e.id));
         if (!cancelado) {
@@ -82,7 +81,7 @@ export default function PromptsPage() {
     return () => {
       cancelado = true;
     };
-  }, [visualizacao, diasRange]);
+  }, [visualizacao, periodo.inicio, periodo.fim]);
 
   const heatmap = useMemo<Map<string, CelulaHeatmap>>(
     () =>
@@ -212,7 +211,7 @@ export default function PromptsPage() {
             </p>
             <div className="flex items-center gap-3">
               <BrandSwitcher marcas={marcas} selecionada={marcaSelecionada} onChange={setMarcaSelecionada} />
-              <RangeSwitcher selecionado={diasRange} onChange={setDiasRange} />
+              <RangeSwitcher periodo={periodo} onChange={setPeriodo} />
             </div>
           </div>
 

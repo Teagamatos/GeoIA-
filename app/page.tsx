@@ -13,13 +13,12 @@ import {
   calcularBreakdownPorDimensao,
   DIMENSOES_DETALHAMENTO,
   DimensaoDetalhamento,
-  rangeDias,
-  rangeAnterior,
+  rangeAnteriorPersonalizado,
   tendencia,
 } from "@/lib/queries";
 import { Marca, DominioProprio, Prompt, Execucao, Fonte, Mencao } from "@/lib/types";
 import { StatCard } from "@/components/StatCard";
-import { BrandSwitcher, RangeSwitcher, PromptSwitcher } from "@/components/TopControls";
+import { BrandSwitcher, RangeSwitcher, PromptSwitcher, ProviderSwitcher } from "@/components/TopControls";
 import { useFiltrosGlobais } from "@/components/FiltrosGlobaisProvider";
 import { RankingTable } from "@/components/RankingTable";
 import { BreakdownTable } from "@/components/BreakdownTable";
@@ -41,10 +40,13 @@ export default function DashboardPage() {
 
   // marca/prompt/período são compartilhados entre as páginas (LAB-1056) — vivem
   // no FiltrosGlobaisProvider, não como useState local daqui.
-  const { marcaSelecionada, setMarcaSelecionada, promptSelecionado, setPromptSelecionado, diasRange, setDiasRange } =
+  const { marcaSelecionada, setMarcaSelecionada, promptSelecionado, setPromptSelecionado, periodo, setPeriodo } =
     useFiltrosGlobais();
   const [dimensaoDetalhamento, setDimensaoDetalhamento] = useState<DimensaoDetalhamento>("modelo");
   const [refreshKey, setRefreshKey] = useState(0);
+  // Filtro por LLM (ChatGPT/Claude/Gemini/Perplexity) — só do Dashboard, não é
+  // compartilhado com as outras páginas (diferente de marca/prompt/período).
+  const [providerSelecionado, setProviderSelecionado] = useState<string | null>(null);
 
   useEffect(() => {
     async function carregar() {
@@ -65,8 +67,8 @@ export default function DashboardPage() {
           if (primeira) setMarcaSelecionada(primeira.id);
         }
 
-        const atual = rangeDias(diasRange);
-        const anterior = rangeAnterior(diasRange);
+        const atual = periodo;
+        const anterior = rangeAnteriorPersonalizado(periodo.inicio, periodo.fim);
 
         const [execAtual, execAnterior] = await Promise.all([
           getExecucoesEntre(atual.inicio, atual.fim),
@@ -93,42 +95,48 @@ export default function DashboardPage() {
     }
     carregar();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [diasRange, refreshKey]);
+  }, [periodo.inicio, periodo.fim, refreshKey]);
 
-  // Quando um prompt específico é selecionado no filtro global, restringe
-  // execuções/menções/fontes só àquele prompt antes de qualquer cálculo.
+  // Quando um prompt e/ou uma IA específica são selecionados no filtro,
+  // restringe execuções/menções/fontes antes de qualquer cálculo.
   const execucoesAtualFiltradas = useMemo(
     () =>
-      promptSelecionado ? execucoesAtual.filter((e) => e.prompt_id === promptSelecionado) : execucoesAtual,
-    [execucoesAtual, promptSelecionado]
+      execucoesAtual.filter(
+        (e) =>
+          (!promptSelecionado || e.prompt_id === promptSelecionado) &&
+          (!providerSelecionado || e.provider === providerSelecionado)
+      ),
+    [execucoesAtual, promptSelecionado, providerSelecionado]
   );
   const execucoesAnteriorFiltradas = useMemo(
     () =>
-      promptSelecionado
-        ? execucoesAnterior.filter((e) => e.prompt_id === promptSelecionado)
-        : execucoesAnterior,
-    [execucoesAnterior, promptSelecionado]
+      execucoesAnterior.filter(
+        (e) =>
+          (!promptSelecionado || e.prompt_id === promptSelecionado) &&
+          (!providerSelecionado || e.provider === providerSelecionado)
+      ),
+    [execucoesAnterior, promptSelecionado, providerSelecionado]
   );
+  // Antes só verificava promptSelecionado pra decidir se filtrava — agora que
+  // tem dois filtros independentes (prompt e provider), o jeito seguro é
+  // sempre restringir pelos ids das execuções já filtradas acima, em vez de
+  // checar cada filtro de novo aqui.
   const mencoesAtualFiltradas = useMemo(() => {
-    if (!promptSelecionado) return mencoesAtual;
     const idsValidos = new Set(execucoesAtualFiltradas.map((e) => e.id));
     return mencoesAtual.filter((m) => idsValidos.has(m.execucao_id));
-  }, [mencoesAtual, execucoesAtualFiltradas, promptSelecionado]);
+  }, [mencoesAtual, execucoesAtualFiltradas]);
   const mencoesAnteriorFiltradas = useMemo(() => {
-    if (!promptSelecionado) return mencoesAnterior;
     const idsValidos = new Set(execucoesAnteriorFiltradas.map((e) => e.id));
     return mencoesAnterior.filter((m) => idsValidos.has(m.execucao_id));
-  }, [mencoesAnterior, execucoesAnteriorFiltradas, promptSelecionado]);
+  }, [mencoesAnterior, execucoesAnteriorFiltradas]);
   const fontesAtualFiltradas = useMemo(() => {
-    if (!promptSelecionado) return fontesAtual;
     const idsValidos = new Set(execucoesAtualFiltradas.map((e) => e.id));
     return fontesAtual.filter((f) => idsValidos.has(f.execucao_id));
-  }, [fontesAtual, execucoesAtualFiltradas, promptSelecionado]);
+  }, [fontesAtual, execucoesAtualFiltradas]);
   const fontesAnteriorFiltradas = useMemo(() => {
-    if (!promptSelecionado) return fontesAnterior;
     const idsValidos = new Set(execucoesAnteriorFiltradas.map((e) => e.id));
     return fontesAnterior.filter((f) => idsValidos.has(f.execucao_id));
-  }, [fontesAnterior, execucoesAnteriorFiltradas, promptSelecionado]);
+  }, [fontesAnterior, execucoesAnteriorFiltradas]);
 
   const metricasAtual = useMemo(
     () => calcularMetricasPorMarca(marcas, execucoesAtualFiltradas, mencoesAtualFiltradas),
@@ -182,7 +190,8 @@ export default function DashboardPage() {
         <div className="flex flex-wrap items-center gap-3">
           <BrandSwitcher marcas={marcas} selecionada={marcaSelecionada} onChange={setMarcaSelecionada} />
           <PromptSwitcher prompts={prompts} selecionado={promptSelecionado} onChange={setPromptSelecionado} />
-          <RangeSwitcher selecionado={diasRange} onChange={setDiasRange} />
+          <ProviderSwitcher selecionado={providerSelecionado} onChange={setProviderSelecionado} />
+          <RangeSwitcher periodo={periodo} onChange={setPeriodo} />
           <button
             onClick={() => setRefreshKey((k) => k + 1)}
             title="Atualizar dados"

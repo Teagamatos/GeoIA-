@@ -123,6 +123,29 @@ export async function getFontesPorExecucoes(execucaoIds: string[]): Promise<Font
   });
 }
 
+export interface UltimaExecucao {
+  data_execucao: string;
+  created_at: string;
+}
+
+/**
+ * A execução mais recente registrada, de qualquer prompt/provider — usada só
+ * pra mostrar "última atualização do motor" na barra lateral, pra quem usa o
+ * dashboard saber quando foi o último processamento da automação, sem
+ * precisar abrir o Prompts ou o Respostas pra descobrir isso.
+ */
+export async function getUltimaExecucao(): Promise<UltimaExecucao | null> {
+  return comCache("ultimaExecucao", async () => {
+    const { data, error } = await supabase
+      .from("geo_execucao")
+      .select("data_execucao, created_at")
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (error) throw error;
+    return data && data.length > 0 ? data[0] : null;
+  });
+}
+
 // ---------- Helpers de data ----------
 
 export function toISODate(d: Date): string {
@@ -142,6 +165,27 @@ export function rangeAnterior(dias: number): { inicio: string; fim: string } {
   const inicio = new Date();
   inicio.setDate(inicio.getDate() - dias * 2 + 1);
   return { inicio: toISODate(inicio), fim: toISODate(fim) };
+}
+
+function duracaoEmDias(inicio: string, fim: string): number {
+  const a = new Date(`${inicio}T00:00:00Z`).getTime();
+  const b = new Date(`${fim}T00:00:00Z`).getTime();
+  return Math.round((b - a) / 86_400_000) + 1;
+}
+
+/**
+ * Mesma ideia do rangeAnterior, mas pra um período escolhido livremente no
+ * calendário (LAB-1064) — pega o intervalo imediatamente anterior, com a
+ * mesma duração, pra comparar "esse período vs o anterior" mesmo quando o
+ * período não é mais um número fixo de dias (7/30/90), e sim datas quaisquer.
+ */
+export function rangeAnteriorPersonalizado(inicio: string, fim: string): { inicio: string; fim: string } {
+  const dias = duracaoEmDias(inicio, fim);
+  const fimAnterior = new Date(`${inicio}T00:00:00Z`);
+  fimAnterior.setUTCDate(fimAnterior.getUTCDate() - 1);
+  const inicioAnterior = new Date(fimAnterior);
+  inicioAnterior.setUTCDate(inicioAnterior.getUTCDate() - (dias - 1));
+  return { inicio: toISODate(inicioAnterior), fim: toISODate(fimAnterior) };
 }
 
 /**

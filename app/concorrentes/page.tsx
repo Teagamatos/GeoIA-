@@ -10,7 +10,6 @@ import {
   getMencoesPorExecucoes,
   calcularSerieVisibilidadePorMarca,
   calcularFluxoFontesPorMarca,
-  rangeDias,
   invalidarCache,
 } from "@/lib/queries";
 import { mapaCoresPorMarca } from "@/lib/color";
@@ -36,9 +35,9 @@ export default function ConcorrentesPage() {
   // não bloqueia, só pede confirmação antes de cadastrar mesmo assim.
   const [avisoColisao, setAvisoColisao] = useState<string | null>(null);
 
-  // diasRange/promptSelecionado são compartilhados com as outras páginas (LAB-1056),
+  // periodo/promptSelecionado são compartilhados com as outras páginas (LAB-1056),
   // via FiltrosGlobaisProvider — não são mais um useState só desta página.
-  const { promptSelecionado, setPromptSelecionado, diasRange, setDiasRange } = useFiltrosGlobais();
+  const { promptSelecionado, setPromptSelecionado, periodo, setPeriodo } = useFiltrosGlobais();
   // Marca destacada ao clicar no nome dela no gráfico de linhas ou no Sankey (aba Visão geral).
   // Clicar de novo na mesma marca tira o destaque.
   const [marcaEmFoco, setMarcaEmFoco] = useState<string | null>(null);
@@ -84,7 +83,7 @@ export default function ConcorrentesPage() {
     async function carregarVisaoGeral() {
       setCarregandoVisaoGeral(true);
       try {
-        const { inicio, fim } = rangeDias(diasRange);
+        const { inicio, fim } = periodo;
         const [promptsData, execsPeriodo] = await Promise.all([getPrompts(), getExecucoesEntre(inicio, fim)]);
         const execs = promptSelecionado
           ? execsPeriodo.filter((e) => e.prompt_id === promptSelecionado)
@@ -107,16 +106,15 @@ export default function ConcorrentesPage() {
     return () => {
       cancelado = true;
     };
-  }, [aba, diasRange, promptSelecionado]);
+  }, [aba, periodo.inicio, periodo.fim, promptSelecionado]);
 
   const coresPorMarca = useMemo(() => mapaCoresPorMarca(marcas), [marcas]);
 
   // A série cobre o período inteiro (não só os dias que tiveram execução) pra
   // um dia sem nenhuma coleta virar uma lacuna real no gráfico, não um "pulo".
-  const { inicio: inicioSerie, fim: fimSerie } = rangeDias(diasRange);
   const { datas, series } = useMemo(
-    () => calcularSerieVisibilidadePorMarca(marcas, execucoes, mencoes, inicioSerie, fimSerie),
-    [marcas, execucoes, mencoes, inicioSerie, fimSerie]
+    () => calcularSerieVisibilidadePorMarca(marcas, execucoes, mencoes, periodo.inicio, periodo.fim),
+    [marcas, execucoes, mencoes, periodo.inicio, periodo.fim]
   );
 
   const fluxoFontes = useMemo(
@@ -294,7 +292,7 @@ export default function ConcorrentesPage() {
         <div className="space-y-8">
           <div className="flex flex-wrap justify-end gap-3">
             <PromptSwitcher prompts={prompts} selecionado={promptSelecionado} onChange={setPromptSelecionado} />
-            <RangeSwitcher selecionado={diasRange} onChange={setDiasRange} />
+            <RangeSwitcher periodo={periodo} onChange={setPeriodo} />
           </div>
 
           {carregandoVisaoGeral ? (

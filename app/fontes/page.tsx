@@ -11,7 +11,6 @@ import {
   listarOcorrenciasDeFonte,
   ModoAgrupamentoFonte,
   ResumoFonte,
-  rangeDias,
 } from "@/lib/queries";
 import { Marca, Prompt, Execucao, Fonte, PROVIDER_LABELS } from "@/lib/types";
 import { mapaCoresPorMarca } from "@/lib/color";
@@ -36,9 +35,9 @@ export default function FontesPage() {
   const [execucoesRaw, setExecucoesRaw] = useState<Execucao[]>([]);
   const [fontesRaw, setFontesRaw] = useState<Fonte[]>([]);
 
-  // diasRange/promptSelecionado são compartilhados com as outras páginas (LAB-1056),
+  // periodo/promptSelecionado são compartilhados com as outras páginas (LAB-1056),
   // via FiltrosGlobaisProvider — não são mais um useState só desta página.
-  const { promptSelecionado, setPromptSelecionado, diasRange, setDiasRange } = useFiltrosGlobais();
+  const { promptSelecionado, setPromptSelecionado, periodo, setPeriodo } = useFiltrosGlobais();
   const [modo, setModo] = useState<ModoAgrupamentoFonte>("url");
   const [filtro, setFiltro] = useState("");
   const [tipoFiltro, setTipoFiltro] = useState("");
@@ -55,7 +54,7 @@ export default function FontesPage() {
       setErro(null);
       setLinhaAberta(null); // os dados vão mudar — evita mostrar drill-down de um período/filtro antigo
       try {
-        const { inicio, fim } = rangeDias(diasRange);
+        const { inicio, fim } = periodo;
         const [marcasData, promptsData, execsPeriodo] = await Promise.all([
           getMarcas(),
           getPrompts(),
@@ -86,7 +85,7 @@ export default function FontesPage() {
     return () => {
       cancelado = true;
     };
-  }, [diasRange, modo, promptSelecionado]);
+  }, [periodo.inicio, periodo.fim, modo, promptSelecionado]);
 
   const coresPorMarca = useMemo(() => mapaCoresPorMarca(marcas), [marcas]);
   const marcaPorId = useMemo(() => new Map(marcas.map((m) => [m.id, m])), [marcas]);
@@ -198,7 +197,7 @@ export default function FontesPage() {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <PromptSwitcher prompts={prompts} selecionado={promptSelecionado} onChange={setPromptSelecionado} />
-          <RangeSwitcher selecionado={diasRange} onChange={setDiasRange} />
+          <RangeSwitcher periodo={periodo} onChange={setPeriodo} />
         </div>
       </header>
 

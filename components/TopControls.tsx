@@ -1,6 +1,8 @@
 "use client";
 
-import { Marca, Prompt } from "@/lib/types";
+import { useEffect, useState } from "react";
+import { Marca, Prompt, PROVIDER_LABELS } from "@/lib/types";
+import { PeriodoFiltro } from "./FiltrosGlobaisProvider";
 
 interface BrandSwitcherProps {
   marcas: Marca[];
@@ -32,32 +34,119 @@ export function BrandSwitcher({ marcas, selecionada, onChange }: BrandSwitcherPr
   );
 }
 
-const RANGES = [
-  { dias: 7, label: "7 dias" },
-  { dias: 30, label: "30 dias" },
-  { dias: 90, label: "90 dias" },
-];
-
+/**
+ * Antes só dava pra escolher entre 7/30/90 dias fixos (contando de hoje pra
+ * trás), depois (LAB-1064) virou calendário livre com esses três como atalho.
+ * Agora os atalhos saíram e ficou só o calendário — os dois campos abaixo
+ * ficam num estado local (pendente) e só disparam a busca de verdade quando
+ * a pessoa clica em "Aplicar" (ou aperta Enter), pra escolher início e fim
+ * sem disparar uma busca por engano no meio do caminho.
+ */
 export function RangeSwitcher({
+  periodo,
+  onChange,
+}: {
+  periodo: PeriodoFiltro;
+  onChange: (periodo: PeriodoFiltro) => void;
+}) {
+  const [pendente, setPendente] = useState<PeriodoFiltro>(periodo);
+
+  // Ressincroniza o rascunho quando o período aplicado muda por fora (restaurado
+  // do localStorage ao abrir a página, por exemplo) — nunca por causa de uma
+  // mudança feita aqui dentro, já que essa só chega em `periodo` depois que a
+  // pessoa clicar em Aplicar.
+  useEffect(() => {
+    setPendente(periodo);
+  }, [periodo.inicio, periodo.fim]);
+
+  // Nunca deixa o início ficar depois do fim (ou vice-versa) — em vez de gerar
+  // um período inválido/invertido, empurra a outra ponta junto.
+  function alterarInicio(valor: string) {
+    if (!valor) return;
+    setPendente((p) => ({ inicio: valor, fim: valor > p.fim ? valor : p.fim }));
+  }
+
+  function alterarFim(valor: string) {
+    if (!valor) return;
+    setPendente((p) => ({ inicio: valor < p.inicio ? valor : p.inicio, fim: valor }));
+  }
+
+  const alterado = pendente.inicio !== periodo.inicio || pendente.fim !== periodo.fim;
+
+  function aplicar() {
+    if (alterado) onChange(pendente);
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="inline-flex items-center gap-1 rounded-full border border-surface-200 bg-surface-0 px-3 py-1.5">
+        <input
+          type="date"
+          value={pendente.inicio}
+          max={pendente.fim}
+          onChange={(e) => alterarInicio(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && aplicar()}
+          title="Início do período"
+          className="w-[7.5rem] bg-transparent text-sm text-slate-700 focus:outline-none"
+        />
+        <span className="text-slate-400">–</span>
+        <input
+          type="date"
+          value={pendente.fim}
+          min={pendente.inicio}
+          onChange={(e) => alterarFim(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && aplicar()}
+          title="Fim do período"
+          className="w-[7.5rem] bg-transparent text-sm text-slate-700 focus:outline-none"
+        />
+        <button
+          onClick={aplicar}
+          disabled={!alterado}
+          title={alterado ? "Aplicar esse período" : "Escolha uma data diferente pra aplicar"}
+          className={`ml-1 rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+            alterado
+              ? "bg-signal-amber text-ink-950 hover:brightness-95"
+              : "bg-surface-100 text-slate-400"
+          }`}
+        >
+          Aplicar
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Filtro por modelo de IA — restringe os dados do Dashboard a um provider específico (ChatGPT/Claude/Gemini/Perplexity). */
+export function ProviderSwitcher({
   selecionado,
   onChange,
 }: {
-  selecionado: number;
-  onChange: (dias: number) => void;
+  selecionado: string | null;
+  onChange: (provider: string | null) => void;
 }) {
   return (
     <div className="inline-flex rounded-full border border-surface-200 bg-surface-0 p-1">
-      {RANGES.map((r) => (
+      <button
+        onClick={() => onChange(null)}
+        className={`rounded-full px-3.5 py-1.5 text-sm transition-colors ${
+          selecionado === null
+            ? "bg-surface-100 text-slate-900 font-medium"
+            : "text-slate-500 hover:text-slate-900"
+        }`}
+      >
+        Todas as IAs
+      </button>
+      {Object.entries(PROVIDER_LABELS).map(([provider, label]) => (
         <button
-          key={r.dias}
-          onClick={() => onChange(r.dias)}
+          key={provider}
+          onClick={() => onChange(provider)}
           className={`rounded-full px-3.5 py-1.5 text-sm transition-colors ${
-            selecionado === r.dias
+            selecionado === provider
               ? "bg-surface-100 text-slate-900 font-medium"
               : "text-slate-500 hover:text-slate-900"
           }`}
         >
-          {r.label}
+          {label}
         </button>
       ))}
     </div>

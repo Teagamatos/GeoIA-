@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { IconGrid, IconMessage, IconUsers, IconLink, IconFile, IconLogout } from "./icons";
 import { supabase } from "@/lib/supabase";
+import { getUltimaExecucao, UltimaExecucao } from "@/lib/queries";
 
 const NAV = [
   { href: "/", label: "Dashboard", icon: IconGrid },
@@ -18,6 +19,7 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const [email, setEmail] = useState<string | null>(null);
+  const [ultimaExecucao, setUltimaExecucao] = useState<UltimaExecucao | null>(null);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setEmail(data.user?.email ?? null));
@@ -25,6 +27,15 @@ export function Sidebar() {
       setEmail(sessao?.user?.email ?? null);
     });
     return () => assinatura.subscription.unsubscribe();
+  }, []);
+
+  // A Sidebar fica montada o tempo todo (vive no layout raiz, não dentro de
+  // cada página) — então isso busca uma vez só e, depois disso, só de novo se
+  // o cache do lib/queries expirar (20s) e a pessoa navegar de novo.
+  useEffect(() => {
+    getUltimaExecucao()
+      .then(setUltimaExecucao)
+      .catch(() => setUltimaExecucao(null));
   }, []);
 
   async function sair() {
@@ -78,6 +89,19 @@ export function Sidebar() {
             >
               <IconLogout className="h-4 w-4" />
             </button>
+          </div>
+        )}
+        {ultimaExecucao && (
+          <div
+            className="mb-3 text-xs text-paper-300/70"
+            title="Data/hora em que a automação registrou a execução mais recente"
+          >
+            Motor atualizado em{" "}
+            {new Date(ultimaExecucao.created_at).toLocaleDateString("pt-BR")} às{" "}
+            {new Date(ultimaExecucao.created_at).toLocaleTimeString("pt-BR", {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
           </div>
         )}
         <div className="text-xs text-paper-300/70 leading-relaxed">
