@@ -105,7 +105,7 @@ export function Sidebar() {
           </div>
         )}
         <div className="text-xs text-paper-300/70 leading-relaxed">
-          Foursales · EasyHire · SalesJobs · WorkPass
+          Foursales · EasyHire · SalesJobs · WorkPass · The Foursales Company
         </div>
       </div>
     </aside>
