@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { Marca, MarcaAlias, TipoMarca, Prompt, Execucao, Fonte, Mencao } from "@/lib/types";
+import { Marca, MarcaAlias, Prompt, Execucao, Fonte, Mencao } from "@/lib/types";
 import {
   getPrompts,
   getExecucoesEntre,
@@ -10,9 +10,10 @@ import {
   getMencoesPorExecucoes,
   calcularSerieVisibilidadePorMarca,
   calcularFluxoFontesPorMarca,
+  rankingPresencaPorMarca,
   invalidarCache,
 } from "@/lib/queries";
-import { mapaCoresPorMarca } from "@/lib/color";
+import { mapaCoresPorMarca, corVisibilidade } from "@/lib/color";
 import { IconPlus, IconArchive } from "@/components/icons";
 import { RangeSwitcher, PromptSwitcher } from "@/components/TopControls";
 import { MultiLineChart } from "@/components/MultiLineChart";
@@ -22,6 +23,13 @@ import { useFiltrosGlobais } from "@/components/FiltrosGlobaisProvider";
 interface MarcaComAliases extends Marca {
   aliasesTexto: string;
 }
+
+/** Quantas marcas cabem no gráfico ao mesmo tempo antes de virar um emaranhado. */
+const MAX_MARCAS_NO_GRAFICO = 10;
+/** Concorrentes sugeridos por padrão (os mais presentes no período), além das marcas próprias. */
+const TOP_CONCORRENTES_PADRAO = 5;
+/** Linhas mostradas por vez na aba Gerenciar. */
+const PAGINA_GERENCIAR = 30;
 
 export default function ConcorrentesPage() {
   const [aba, setAba] = useState<"visao-geral" | "gerenciar">("visao-geral");
@@ -47,6 +55,16 @@ export default function ConcorrentesPage() {
   const [fontes, setFontes] = useState<Fonte[]>([]);
   const [mencoes, setMencoes] = useState<Mencao[]>([]);
   const [carregandoVisaoGeral, setCarregandoVisaoGeral] = useState(false);
+
+  // Marcas escolhidas pra aparecer no gráfico e no fluxo. `null` = seleção automática
+  // (marcas próprias com presença + os concorrentes mais presentes do período).
+  const [selecaoManual, setSelecaoManual] = useState<string[] | null>(null);
+  const [buscaGrafico, setBuscaGrafico] = useState("");
+  const [rankingExpandido, setRankingExpandido] = useState(false);
+
+  // Aba Gerenciar
+  const [busca, setBusca] = useState("");
+  const [filtroStatus, setFiltroStatus] = useState<"ativas" | "arquivadas" | "todas">("ativas");
 
   async function carregar() {
     setCarregando(true);
@@ -108,24 +126,84 @@ export default function ConcorrentesPage() {
     };
   }, [aba, periodo.inicio, periodo.fim, promptSelecionado]);
 
-  const coresPorMarca = useMemo(() => mapaCoresPorMarca(marcas), [marcas]);
+  // ---------- Visão geral: ranking, seleção de marcas, série e fluxo ----------
 
-  // A série cobre o período inteiro (não só os dias que tiveram execução) pra
-  // um dia sem nenhuma coleta virar uma lacuna real no gráfico, não um "pulo".
-  const { datas, series } = useMemo(
-    () => calcularSerieVisibilidadePorMarca(marcas, execucoes, mencoes, periodo.inicio, periodo.fim),
-    [marcas, execucoes, mencoes, periodo.inicio, periodo.fim]
+  const ranking = useMemo(
+    () => rankingPresencaPorMarca(marcas, execucoes, mencoes),
+    [marcas, execucoes, mencoes]
   );
 
-  const fluxoFontes = useMemo(
-    () => calcularFluxoFontesPorMarca(fontes, mencoes, marcas),
-    [fontes, mencoes, marcas]
+  const idsPadrao = useMemo(() => {
+    const proprias = ranking.filter((r) => r.tipo === "propria" && r.respostas > 0);
+    const concorrentes = ranking
+      .filter((r) => r.tipo !== "propria" && r.respostas > 0)
+      .slice(0, TOP_CONCORRENTES_PADRAO);
+    const ids = [...proprias, ...concorrentes].map((r) => r.marcaId);
+    if (ids.length > 0) return ids;
+    // Sem nenhuma menção no período: ao menos as marcas próprias, pra o gráfico não ficar vazio.
+    return ranking.filter((r) => r.tipo === "propria").map((r) => r.marcaId);
+  }, [ranking]);
+
+  const idsSelecionados = selecaoManual ?? idsPadrao;
+
+  // Marcas selecionadas, próprias primeiro e depois por presença (a mesma ordem da tabela).
+  const marcasSelecionadas = useMemo(() => {
+    const porId = new Map(marcas.map((m) => [m.id, m]));
+    const ordemRanking = new Map(ranking.map((r, i) => [r.marcaId, i]));
+    return idsSelecionados
+      .map((id) => porId.get(id))
+      .filter((m): m is MarcaComAliases => !!m && m.ativo)
+      .sort((a, b) => {
+        const pa = a.tipo === "propria" ? 0 : 1;
+        const pb = b.tipo === "propria" ? 0 : 1;
+        if (pa !== pb) return pa - pb;
+        return (ordemRanking.get(a.id) ?? 9999) - (ordemRanking.get(b.id) ?? 9999);
+      });
+  }, [marcas, ranking, idsSelecionados]);
+
+  // Cores só para as marcas em exibição (com ~230 marcas e 8 cores, tudo se repetia).
+  const coresPorMarca = useMemo(() => mapaCoresPorMarca(marcasSelecionadas), [marcasSelecionadas]);
+
+  const { datas, series, totais } = useMemo(
+    () => calcularSerieVisibilidadePorMarca(marcasSelecionadas, execucoes, mencoes),
+    [marcasSelecionadas, execucoes, mencoes]
   );
+
+  const fluxoFontes = useMemo(() => {
+    const f = calcularFluxoFontesPorMarca(fontes, mencoes, marcasSelecionadas);
+    const comLink = new Set(f.links.map((l) => l.dominio));
+    return { dominios: f.dominios.filter((d) => comLink.has(d)), links: f.links };
+  }, [fontes, mencoes, marcasSelecionadas]);
+
+  function alternarSelecao(id: string) {
+    setSelecaoManual((atual) => {
+      const base = atual ?? idsPadrao;
+      if (base.includes(id)) return base.filter((x) => x !== id);
+      if (base.length >= MAX_MARCAS_NO_GRAFICO) return base; // limite: o gráfico perde a leitura acima disso
+      return [...base, id];
+    });
+  }
+
+  const limiteAtingido = idsSelecionados.length >= MAX_MARCAS_NO_GRAFICO;
+
+  const sugestoesBusca = useMemo(() => {
+    const termo = normalizarNome(buscaGrafico);
+    if (!termo) return [];
+    const sel = new Set(idsSelecionados);
+    return ranking
+      .filter((r) => !sel.has(r.marcaId) && normalizarNome(r.nome).includes(termo))
+      .slice(0, 8);
+  }, [buscaGrafico, ranking, idsSelecionados]);
+
+  const rankingVisivel = rankingExpandido ? ranking.filter((r) => r.respostas > 0) : ranking.slice(0, 15);
+  const totalComPresenca = ranking.filter((r) => r.respostas > 0).length;
+
+  // ---------- Gerenciar ----------
 
   function normalizarNome(s: string): string {
     return s
       .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[̀-ͯ]/g, "")
       .toLowerCase()
       .trim();
   }
@@ -246,16 +324,28 @@ export default function ConcorrentesPage() {
   }
 
   const proprias = marcas.filter((m) => m.tipo === "propria");
-  const concorrentes = marcas.filter((m) => m.tipo !== "propria");
+  const concorrentesTodos = marcas.filter((m) => m.tipo !== "propria");
+  const concorrentesAtivos = concorrentesTodos.filter((m) => m.ativo).length;
+  const concorrentesArquivados = concorrentesTodos.length - concorrentesAtivos;
+
+  const concorrentesFiltrados = useMemo(() => {
+    const termo = normalizarNome(busca);
+    return concorrentesTodos.filter((m) => {
+      if (filtroStatus === "ativas" && !m.ativo) return false;
+      if (filtroStatus === "arquivadas" && m.ativo) return false;
+      if (!termo) return true;
+      return normalizarNome(m.nome).includes(termo) || normalizarNome(m.aliasesTexto).includes(termo);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [concorrentesTodos, busca, filtroStatus]);
 
   return (
-    <div className="p-6 md:p-8 max-w-5xl">
+    <div className="p-6 md:p-8 max-w-6xl">
       <header className="flex flex-wrap items-center justify-between gap-4 mb-6">
         <div>
           <h1 className="font-display text-2xl font-semibold text-slate-900">Concorrentes</h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            Marcas monitoradas nas respostas de IA. A automação diária também pode sugerir novos
-            concorrentes aqui — revise e ajuste como preferir.
+            Marcas monitoradas nas respostas de IA. A coleta roda toda segunda e quinta-feira.
           </p>
         </div>
         <div className="inline-flex rounded-full border border-surface-200 bg-surface-0 p-1 shrink-0">
@@ -295,20 +385,213 @@ export default function ConcorrentesPage() {
             <RangeSwitcher periodo={periodo} onChange={setPeriodo} />
           </div>
 
+          {/* Escolha de marcas: o gráfico e o fluxo mostram só estas, não as ~230 cadastradas. */}
+          <section className="rounded-card border border-surface-200 bg-surface-0 p-5">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <h2 className="font-display text-sm font-semibold text-slate-700">
+                Marcas no gráfico{" "}
+                <span className="font-normal text-slate-500">
+                  ({idsSelecionados.length}/{MAX_MARCAS_NO_GRAFICO})
+                </span>
+              </h2>
+              <div className="flex flex-wrap gap-2 text-xs">
+                <button
+                  onClick={() => setSelecaoManual(null)}
+                  className="rounded-full border border-surface-200 px-3 py-1 text-slate-700 hover:bg-surface-100"
+                  title="Marcas próprias + os concorrentes mais presentes do período"
+                >
+                  Padrão
+                </button>
+                <button
+                  onClick={() => setSelecaoManual(proprias.filter((m) => m.ativo).map((m) => m.id))}
+                  className="rounded-full border border-surface-200 px-3 py-1 text-slate-700 hover:bg-surface-100"
+                >
+                  Só marcas próprias
+                </button>
+                <button
+                  onClick={() =>
+                    setSelecaoManual([
+                      ...ranking.filter((r) => r.tipo === "propria" && r.respostas > 0).map((r) => r.marcaId),
+                      ...ranking
+                        .filter((r) => r.tipo !== "propria" && r.respostas > 0)
+                        .slice(0, MAX_MARCAS_NO_GRAFICO)
+                        .map((r) => r.marcaId),
+                    ].slice(0, MAX_MARCAS_NO_GRAFICO))
+                  }
+                  className="rounded-full border border-surface-200 px-3 py-1 text-slate-700 hover:bg-surface-100"
+                >
+                  Top {MAX_MARCAS_NO_GRAFICO}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              {marcasSelecionadas.map((m) => (
+                <button
+                  key={m.id}
+                  onClick={() => alternarSelecao(m.id)}
+                  title="Remover do gráfico"
+                  className="flex items-center gap-1.5 rounded-full border border-surface-200 bg-surface-50 py-1 pl-2.5 pr-2 text-xs text-slate-900 hover:bg-surface-100"
+                >
+                  <span
+                    className="h-2 w-2 rounded-full"
+                    style={{ backgroundColor: coresPorMarca.get(m.id) ?? "#8FA0BA" }}
+                  />
+                  {m.nome}
+                  {m.tipo === "propria" && <span className="text-slate-500">· própria</span>}
+                  <span className="text-slate-400">×</span>
+                </button>
+              ))}
+              {marcasSelecionadas.length === 0 && (
+                <span className="text-xs text-slate-500">Nenhuma marca selecionada.</span>
+              )}
+            </div>
+
+            <div className="relative mt-3 max-w-sm">
+              <input
+                value={buscaGrafico}
+                onChange={(e) => setBuscaGrafico(e.target.value)}
+                placeholder={limiteAtingido ? "Limite de marcas atingido — remova uma para adicionar" : "Adicionar marca ao gráfico…"}
+                disabled={limiteAtingido}
+                className="w-full rounded-md border border-surface-200 bg-surface-50 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-500/60 disabled:opacity-60"
+              />
+              {sugestoesBusca.length > 0 && (
+                <ul className="absolute z-20 mt-1 w-full overflow-hidden rounded-md border border-surface-200 bg-surface-0 shadow-lg">
+                  {sugestoesBusca.map((r) => (
+                    <li key={r.marcaId}>
+                      <button
+                        onClick={() => {
+                          alternarSelecao(r.marcaId);
+                          setBuscaGrafico("");
+                        }}
+                        className="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-surface-100"
+                      >
+                        <span className="text-slate-900">{r.nome}</span>
+                        <span className="text-xs text-slate-500">
+                          {r.respostas} {r.respostas === 1 ? "resposta" : "respostas"}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </section>
+
           {carregandoVisaoGeral ? (
             <div className="animate-pulse h-56 rounded-card bg-surface-50" />
           ) : (
             <section>
               <h2 className="font-display text-sm font-semibold text-slate-700 mb-3">
-                Visibilidade ao longo do tempo
+                Visibilidade por coleta
               </h2>
               <MultiLineChart
                 datas={datas}
                 series={series}
+                totais={totais}
                 cores={coresPorMarca}
                 emFoco={marcaEmFoco}
                 onFocar={alternarFoco}
               />
+              <p className="mt-2 text-xs text-slate-500">
+                Cada ponto é uma coleta (segunda ou quinta): % das respostas daquele dia que citam a
+                marca. Passe o mouse sobre um dia para ver os valores e a quantidade de respostas.
+              </p>
+            </section>
+          )}
+
+          {/* Ranking compacto: dá pra conferir os números sem ler o gráfico. */}
+          {!carregandoVisaoGeral && (
+            <section>
+              <div className="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+                <h2 className="font-display text-sm font-semibold text-slate-700">
+                  Presença no período{" "}
+                  <span className="font-normal text-slate-500">
+                    · {execucoes.length} respostas · {totalComPresenca} marcas com presença
+                  </span>
+                </h2>
+                {totalComPresenca > 15 && (
+                  <button
+                    onClick={() => setRankingExpandido((v) => !v)}
+                    className="text-xs text-slate-700 underline-offset-2 hover:underline"
+                  >
+                    {rankingExpandido ? "Mostrar só o top 15" : `Ver todas (${totalComPresenca})`}
+                  </button>
+                )}
+              </div>
+              <div className="rounded-card border border-surface-200 bg-surface-0 overflow-hidden">
+                <div className="max-h-[28rem] overflow-y-auto">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-surface-50 text-xs text-slate-500">
+                      <tr>
+                        <th className="px-4 py-2 text-left font-medium">Marca</th>
+                        <th className="px-4 py-2 text-right font-medium">Respostas</th>
+                        <th className="px-4 py-2 text-right font-medium">Presença</th>
+                        <th className="px-4 py-2 text-right font-medium" title="Posição média de aparição na resposta (menor é melhor)">
+                          Posição média
+                        </th>
+                        <th className="px-4 py-2 text-right font-medium">No gráfico</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-surface-100">
+                      {rankingVisivel.map((r) => {
+                        const noGrafico = idsSelecionados.includes(r.marcaId);
+                        const cor = corVisibilidade(r.pct);
+                        return (
+                          <tr key={r.marcaId} className={noGrafico ? "bg-surface-50/60" : undefined}>
+                            <td className="px-4 py-2">
+                              <span className="flex items-center gap-2">
+                                <span
+                                  className="h-2 w-2 shrink-0 rounded-full"
+                                  style={{ backgroundColor: noGrafico ? coresPorMarca.get(r.marcaId) ?? "#8FA0BA" : "#D3DAE6" }}
+                                />
+                                <span className="text-slate-900">{r.nome}</span>
+                                {r.tipo === "propria" && (
+                                  <span className="rounded-full bg-signal-amber/15 px-2 py-0.5 text-[10px] font-medium text-ink-950">
+                                    própria
+                                  </span>
+                                )}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-right text-slate-700">{r.respostas}</td>
+                            <td className="px-4 py-2 text-right">
+                              <span
+                                className="rounded-full px-2 py-0.5 text-xs font-medium"
+                                style={{ backgroundColor: cor.bg, color: cor.text }}
+                              >
+                                {r.pct.toFixed(1)}%
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-right text-slate-700">
+                              {r.posicaoMedia !== null ? r.posicaoMedia.toFixed(1) : "—"}
+                            </td>
+                            <td className="px-4 py-2 text-right">
+                              <button
+                                onClick={() => alternarSelecao(r.marcaId)}
+                                disabled={!noGrafico && limiteAtingido}
+                                className={`rounded-md px-2 py-1 text-xs transition-colors disabled:opacity-40 ${
+                                  noGrafico
+                                    ? "bg-signal-teal/10 text-signal-teal hover:bg-signal-teal/20"
+                                    : "text-slate-500 hover:bg-surface-100 hover:text-slate-900"
+                                }`}
+                              >
+                                {noGrafico ? "Remover" : "Adicionar"}
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {rankingVisivel.length === 0 && (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-6 text-center text-sm text-slate-500">
+                            Nenhuma marca foi citada no período selecionado.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </section>
           )}
 
@@ -321,7 +604,7 @@ export default function ConcorrentesPage() {
               </h2>
               <SourceFlowSankey
                 dominios={fluxoFontes.dominios}
-                marcas={marcas}
+                marcas={marcasSelecionadas}
                 links={fluxoFontes.links}
                 cores={coresPorMarca}
                 emFoco={marcaEmFoco}
@@ -387,9 +670,49 @@ export default function ConcorrentesPage() {
                 permiteArquivar={false}
               />
               <div className="h-8" />
+
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                <h2 className="font-display text-sm font-semibold text-slate-700">
+                  Concorrentes{" "}
+                  <span className="font-normal text-slate-500">
+                    · {concorrentesAtivos} ativos
+                    {concorrentesArquivados > 0 && ` · ${concorrentesArquivados} arquivados`}
+                  </span>
+                </h2>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    value={busca}
+                    onChange={(e) => setBusca(e.target.value)}
+                    placeholder="Buscar concorrente…"
+                    className="w-56 rounded-md border border-surface-200 bg-surface-0 px-3 py-1.5 text-sm text-slate-900 placeholder:text-slate-500/60"
+                  />
+                  <div className="inline-flex rounded-full border border-surface-200 bg-surface-0 p-0.5 text-xs">
+                    {(
+                      [
+                        ["ativas", "Ativos"],
+                        ["arquivadas", "Arquivados"],
+                        ["todas", "Todos"],
+                      ] as const
+                    ).map(([valor, rotulo]) => (
+                      <button
+                        key={valor}
+                        onClick={() => setFiltroStatus(valor)}
+                        className={`rounded-full px-3 py-1 transition-colors ${
+                          filtroStatus === valor
+                            ? "bg-surface-100 text-slate-900 font-medium"
+                            : "text-slate-500 hover:text-slate-900"
+                        }`}
+                      >
+                        {rotulo}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
               <MarcaGrupo
-                titulo="Concorrentes"
-                marcas={concorrentes}
+                key={`${busca}|${filtroStatus}`}
+                marcas={concorrentesFiltrados}
                 onNome={atualizarCampo}
                 onSalvarNome={salvarCampo}
                 onAtivo={alternarAtivo}
@@ -397,7 +720,12 @@ export default function ConcorrentesPage() {
                 onSalvarAliases={salvarAliases}
                 onArquivar={arquivar}
                 permiteArquivar={true}
-                vazio="Nenhum concorrente cadastrado ainda. Adicione acima ou espere a automação diária sugerir."
+                limitePagina={PAGINA_GERENCIAR}
+                vazio={
+                  busca || filtroStatus !== "ativas"
+                    ? "Nenhum concorrente encontrado com esse filtro."
+                    : "Nenhum concorrente cadastrado ainda. Adicione acima."
+                }
               />
             </>
           )}
@@ -417,9 +745,10 @@ function MarcaGrupo({
   onSalvarAliases,
   onArquivar,
   permiteArquivar,
+  limitePagina,
   vazio,
 }: {
-  titulo: string;
+  titulo?: string;
   marcas: MarcaComAliases[];
   onNome: (id: string, campo: "nome" | "tipo", valor: string) => void;
   onSalvarNome: (id: string, campo: "nome" | "tipo", valor: string) => void;
@@ -428,60 +757,103 @@ function MarcaGrupo({
   onSalvarAliases: (m: MarcaComAliases) => void;
   onArquivar: (m: MarcaComAliases) => void;
   permiteArquivar: boolean;
+  /** Quantas linhas mostrar por vez (com botão "Mostrar mais"). Sem isso, mostra todas. */
+  limitePagina?: number;
   vazio?: string;
 }) {
+  const [visiveis, setVisiveis] = useState(limitePagina ?? Infinity);
+  const [aliasAbertos, setAliasAbertos] = useState<Set<string>>(new Set());
+
+  const alternarAlias = (id: string) =>
+    setAliasAbertos((atual) => {
+      const novo = new Set(atual);
+      if (novo.has(id)) novo.delete(id);
+      else novo.add(id);
+      return novo;
+    });
+
+  const lista = marcas.slice(0, visiveis);
+
   return (
     <section>
-      <h2 className="font-display text-sm font-semibold text-slate-700 mb-3">{titulo}</h2>
+      {titulo && <h2 className="font-display text-sm font-semibold text-slate-700 mb-3">{titulo}</h2>}
       {marcas.length === 0 ? (
         <div className="rounded-card border border-surface-200 bg-surface-0 p-6 text-center text-sm text-slate-500">
           {vazio ?? "Nenhuma marca aqui."}
         </div>
       ) : (
         <div className="rounded-card border border-surface-200 bg-surface-0 divide-y divide-surface-100">
-          {marcas.map((m) => (
-            <div key={m.id} className="flex flex-col gap-2 px-5 py-4">
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => onAtivo(m)}
-                  title={m.ativo ? "Ativa — clique para desativar" : "Inativa — clique para ativar"}
-                  className={`h-2.5 w-2.5 shrink-0 rounded-full ${m.ativo ? "bg-signal-teal" : "bg-slate-300"}`}
-                />
-                <input
-                  value={m.nome}
-                  onChange={(e) => onNome(m.id, "nome", e.target.value)}
-                  onBlur={(e) => onSalvarNome(m.id, "nome", e.target.value)}
-                  className="flex-1 bg-transparent text-sm font-medium text-slate-900 focus:bg-surface-50 rounded px-1"
-                />
-                {permiteArquivar &&
-                  (m.ativo ? (
+          {lista.map((m) => {
+            const aberto = aliasAbertos.has(m.id) || (!limitePagina && true);
+            const qtdAliases = m.aliasesTexto ? m.aliasesTexto.split(",").filter((a) => a.trim()).length : 0;
+            return (
+              <div key={m.id} className="flex flex-col gap-1.5 px-5 py-2.5">
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => onAtivo(m)}
+                    title={m.ativo ? "Ativa — clique para desativar" : "Inativa — clique para ativar"}
+                    className={`h-2.5 w-2.5 shrink-0 rounded-full ${m.ativo ? "bg-signal-teal" : "bg-slate-300"}`}
+                  />
+                  <input
+                    value={m.nome}
+                    onChange={(e) => onNome(m.id, "nome", e.target.value)}
+                    onBlur={(e) => onSalvarNome(m.id, "nome", e.target.value)}
+                    className="flex-1 bg-transparent text-sm font-medium text-slate-900 focus:bg-surface-50 rounded px-1"
+                  />
+                  {limitePagina && (
                     <button
-                      onClick={() => onArquivar(m)}
-                      className="flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-slate-500 hover:bg-surface-100 hover:text-slate-900"
-                      title="Arquivar — tira do ranking/filtros, mas mantém todo o histórico no banco"
+                      onClick={() => alternarAlias(m.id)}
+                      className="shrink-0 rounded-md px-2 py-1 text-xs text-slate-500 hover:bg-surface-100 hover:text-slate-900"
+                      title="Variações do nome usadas para encontrar a marca nas respostas"
                     >
-                      <IconArchive className="h-4 w-4" />
-                      Arquivar
+                      Variações{qtdAliases > 0 ? ` (${qtdAliases})` : ""}
                     </button>
-                  ) : (
-                    <button
-                      onClick={() => onAtivo(m)}
-                      className="flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-signal-teal hover:bg-signal-teal/10"
-                      title="Reativar — volta a aparecer no ranking/filtros"
-                    >
-                      Reativar
-                    </button>
-                  ))}
+                  )}
+                  {permiteArquivar &&
+                    (m.ativo ? (
+                      <button
+                        onClick={() => onArquivar(m)}
+                        className="flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-slate-500 hover:bg-surface-100 hover:text-slate-900"
+                        title="Arquivar — tira do ranking/filtros, mas mantém todo o histórico no banco"
+                      >
+                        <IconArchive className="h-4 w-4" />
+                        Arquivar
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => onAtivo(m)}
+                        className="flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-signal-teal hover:bg-signal-teal/10"
+                        title="Reativar — volta a aparecer no ranking/filtros"
+                      >
+                        Reativar
+                      </button>
+                    ))}
+                </div>
+                {aberto && (
+                  <input
+                    value={m.aliasesTexto}
+                    onChange={(e) => onAliases(m.id, e.target.value)}
+                    onBlur={() => onSalvarAliases(m)}
+                    placeholder="Variações do nome, separadas por vírgula (ex: TFC, Foursales Company)"
+                    className="ml-5 rounded-md bg-transparent text-xs text-slate-500 placeholder:text-slate-500/50 focus:bg-surface-50 px-1 py-1"
+                  />
+                )}
               </div>
-              <input
-                value={m.aliasesTexto}
-                onChange={(e) => onAliases(m.id, e.target.value)}
-                onBlur={() => onSalvarAliases(m)}
-                placeholder="Variações do nome, separadas por vírgula (ex: TFC, Foursales Company)"
-                className="ml-5 rounded-md bg-transparent text-xs text-slate-500 placeholder:text-slate-500/50 focus:bg-surface-50 px-1 py-1"
-              />
-            </div>
-          ))}
+            );
+          })}
+        </div>
+      )}
+      {marcas.length > lista.length && (
+        <div className="mt-3 flex items-center justify-center gap-3 text-xs text-slate-500">
+          <span>
+            Mostrando {lista.length} de {marcas.length}
+          </span>
+          <button
+            onClick={() => setVisiveis((v) => v + (limitePagina ?? 30))}
+            className="rounded-full border border-surface-200 bg-surface-0 px-3 py-1 text-slate-700 hover:bg-surface-100"
+          >
+            Mostrar mais
+          </button>
         </div>
       )}
     </section>

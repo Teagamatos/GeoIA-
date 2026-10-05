@@ -97,30 +97,47 @@ export async function getExecucoesEntre(dataInicio: string, dataFim: string): Pr
   });
 }
 
+/**
+ * O Supabase corta qualquer consulta em 1000 linhas por padrão, em silêncio. Com 160+ respostas
+ * por coleta (e ~700 menções/~1000 fontes por semana), um `.in(...)` simples devolvia dado
+ * incompleto sem avisar. Aqui os ids vão em blocos (URL curta) e cada bloco é lido em páginas.
+ */
+async function buscarEmBlocos<T>(
+  tabela: string,
+  coluna: string,
+  ids: string[],
+  tamanhoBloco = 80,
+  tamanhoPagina = 1000
+): Promise<T[]> {
+  const resultado: T[] = [];
+  for (let i = 0; i < ids.length; i += tamanhoBloco) {
+    const bloco = ids.slice(i, i + tamanhoBloco);
+    for (let from = 0; ; from += tamanhoPagina) {
+      const { data, error } = await supabase
+        .from(tabela)
+        .select("*")
+        .in(coluna, bloco)
+        .order("id", { ascending: true })
+        .range(from, from + tamanhoPagina - 1);
+      if (error) throw error;
+      const linhas = (data ?? []) as T[];
+      resultado.push(...linhas);
+      if (linhas.length < tamanhoPagina) break;
+    }
+  }
+  return resultado;
+}
+
 export async function getMencoesPorExecucoes(execucaoIds: string[]): Promise<Mencao[]> {
   if (execucaoIds.length === 0) return [];
   const chave = `mencoes:${[...execucaoIds].sort().join(",")}`;
-  return comCache(chave, async () => {
-    const { data, error } = await supabase
-      .from("geo_mencao")
-      .select("*")
-      .in("execucao_id", execucaoIds);
-    if (error) throw error;
-    return data ?? [];
-  });
+  return comCache(chave, () => buscarEmBlocos<Mencao>("geo_mencao", "execucao_id", execucaoIds));
 }
 
 export async function getFontesPorExecucoes(execucaoIds: string[]): Promise<Fonte[]> {
   if (execucaoIds.length === 0) return [];
   const chave = `fontes:${[...execucaoIds].sort().join(",")}`;
-  return comCache(chave, async () => {
-    const { data, error } = await supabase
-      .from("geo_fonte")
-      .select("*")
-      .in("execucao_id", execucaoIds);
-    if (error) throw error;
-    return data ?? [];
-  });
+  return comCache(chave, () => buscarEmBlocos<Fonte>("geo_fonte", "execucao_id", execucaoIds));
 }
 
 export interface UltimaExecucao {
@@ -418,57 +435,110 @@ export interface SeriePorMarca {
   marcaId: string;
   nome: string;
   /**
-   * Visibilidade % por dia, alinhado com `datas`. `null` num dia = não teve
-   * nenhuma execução (de nenhuma marca) naquele dia — período sem coleta, que
-   * quem desenha o gráfico deve tratar como uma lacuna na linha, não como um
-   * 0% (0% real é quando teve execução mas nenhuma menção à marca).
+   * Visibilidade % por coleta, alinhado com `datas`. Cada ponto = % das respostas daquela
+   * coleta (dia com execução) em que a marca foi mencionada.
    */
   pontos: (number | null)[];
+  /** Quantas respostas mencionaram a marca em cada coleta (alinhado com `datas`). */
+  contagens: number[];
 }
 
 /**
- * Visibilidade (%) por dia, para cada marca ativa, no conjunto de execuções dado.
- * `inicio`/`fim` definem o período pedido (ex: os mesmos 7/30/90 dias do filtro
- * de período) — a série cobre TODOS os dias do período, não só os dias que
- * aparecem em `execucoes`, senão um dia sem nenhuma coleta simplesmente
- * desaparecia do eixo (comprimindo o gráfico) em vez de aparecer como buraco.
+ * Visibilidade (%) por COLETA, para cada marca ativa. O motor roda segunda e quinta,
+ * então o eixo tem só os dias em que houve execução (em vez de todo dia do calendário,
+ * que deixava o gráfico quase vazio e achatado). `totais[i]` = nº de respostas da coleta i.
+ * `inicio`/`fim` ficam na assinatura por compatibilidade; o recorte do período já vem
+ * nas `execucoes`.
  */
 export function calcularSerieVisibilidadePorMarca(
   marcas: Marca[],
   execucoes: Execucao[],
   mencoes: Mencao[],
-  inicio: string,
-  fim: string
-): { datas: string[]; series: SeriePorMarca[] } {
-  const datas = todasAsDatasEntre(inicio, fim);
-
+  _inicio?: string,
+  _fim?: string
+): { datas: string[]; series: SeriePorMarca[]; totais: number[] } {
   const totalPorDia = new Map<string, number>();
   for (const ex of execucoes) {
     totalPorDia.set(ex.data_execucao, (totalPorDia.get(ex.data_execucao) ?? 0) + 1);
+  }
+  const datas = Array.from(totalPorDia.keys()).sort();
+  const totais = datas.map((d) => totalPorDia.get(d) ?? 0);
+
+  const dataPorExecucao = new Map(execucoes.map((e) => [e.id, e.data_execucao]));
+
+  // execucoes distintas com menção, por marca e por dia
+  const porMarcaEDia = new Map<string, Map<string, Set<string>>>();
+  for (const m of mencoes) {
+    const dia = dataPorExecucao.get(m.execucao_id);
+    if (!dia) continue;
+    let porDia = porMarcaEDia.get(m.marca_id);
+    if (!porDia) {
+      porDia = new Map();
+      porMarcaEDia.set(m.marca_id, porDia);
+    }
+    const set = porDia.get(dia) ?? new Set<string>();
+    set.add(m.execucao_id);
+    porDia.set(dia, set);
   }
 
   const series = marcas
     .filter((m) => m.ativo)
     .map((marca) => {
-      const execIdsComMencao = new Set(
-        mencoes.filter((m) => m.marca_id === marca.id).map((m) => m.execucao_id)
-      );
-      const comMencaoPorDia = new Map<string, number>();
-      for (const ex of execucoes) {
-        if (execIdsComMencao.has(ex.id)) {
-          comMencaoPorDia.set(ex.data_execucao, (comMencaoPorDia.get(ex.data_execucao) ?? 0) + 1);
-        }
-      }
-      const pontos = datas.map((d): number | null => {
-        const total = totalPorDia.get(d) ?? 0;
-        if (total === 0) return null; // sem coleta nesse dia — lacuna, não 0%
-        const com = comMencaoPorDia.get(d) ?? 0;
-        return (com / total) * 100;
-      });
-      return { marcaId: marca.id, nome: marca.nome, pontos };
+      const porDia = porMarcaEDia.get(marca.id);
+      const contagens = datas.map((d) => porDia?.get(d)?.size ?? 0);
+      const pontos = datas.map((_, i): number | null => (totais[i] > 0 ? (contagens[i] / totais[i]) * 100 : null));
+      return { marcaId: marca.id, nome: marca.nome, pontos, contagens };
     });
 
-  return { datas, series };
+  return { datas, series, totais };
+}
+
+export interface PresencaMarca {
+  marcaId: string;
+  nome: string;
+  tipo: Marca["tipo"];
+  respostas: number;
+  pct: number;
+  posicaoMedia: number | null;
+}
+
+/** Ranking de presença no conjunto de execuções dado: respostas com ≥1 menção, % e posição média. */
+export function rankingPresencaPorMarca(
+  marcas: Marca[],
+  execucoes: Execucao[],
+  mencoes: Mencao[]
+): PresencaMarca[] {
+  const total = execucoes.length;
+  const execIds = new Set(execucoes.map((e) => e.id));
+  const respostas = new Map<string, Set<string>>();
+  const somaOrdem = new Map<string, { soma: number; n: number }>();
+  for (const m of mencoes) {
+    if (!execIds.has(m.execucao_id)) continue;
+    const set = respostas.get(m.marca_id) ?? new Set<string>();
+    set.add(m.execucao_id);
+    respostas.set(m.marca_id, set);
+    if (m.ordem != null) {
+      const acc = somaOrdem.get(m.marca_id) ?? { soma: 0, n: 0 };
+      acc.soma += m.ordem;
+      acc.n += 1;
+      somaOrdem.set(m.marca_id, acc);
+    }
+  }
+  return marcas
+    .filter((m) => m.ativo)
+    .map((m) => {
+      const r = respostas.get(m.id)?.size ?? 0;
+      const o = somaOrdem.get(m.id);
+      return {
+        marcaId: m.id,
+        nome: m.nome,
+        tipo: m.tipo,
+        respostas: r,
+        pct: total > 0 ? (r / total) * 100 : 0,
+        posicaoMedia: o && o.n > 0 ? o.soma / o.n : null,
+      };
+    })
+    .sort((a, b) => b.respostas - a.respostas || a.nome.localeCompare(b.nome));
 }
 
 export type ModoAgrupamentoFonte = "url" | "dominio";
